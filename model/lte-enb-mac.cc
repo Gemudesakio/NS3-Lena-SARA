@@ -707,6 +707,7 @@ void LteEnbMac::CheckPreambleReceptionForAllCoverageClases(){
 void
 LteEnbMac::CheckIfPreambleWasReceived (NbIotRrcSap::NprachParametersNb ce, bool edt) 
 {
+
   //======= PROCESO 1: CALCULO OCCASION NPRACH =======
  
   // cantidad de subtramas que han avanzado desde tiempo 0 hasta el momento actual
