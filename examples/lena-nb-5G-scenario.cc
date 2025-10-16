@@ -48,32 +48,44 @@ using namespace ns3;
  * It also starts another flow between each UE pair.
  */
 
-NS_LOG_COMPONENT_DEFINE ("LenaNb5G");
+NS_LOG_COMPONENT_DEFINE ("LenaNb5G"); // componente propio de login para esta simulacion 
 
-int
-main (int argc, char *argv[])
+int main (int argc, char *argv[])
 {
   Time simTime = Minutes(6);
   uint64_t ues_to_consider = 0;
 
-  uint8_t worker = 0;
-  int seed = 1;
-  std::string simName = "test";
-  double cellsize = 2500; // in meters
+  uint8_t worker = 0; //etiqueta para logging cuando se usa multithreading (varias simulaciones en paralelo)
+  int seed = 1; //semilla para generador de numeros aleatorios
+  std::string simName = "test"; // se utilizara como prefijo para los ficheros de log
+  double cellsize = 2500; // perimetro de la celda circular en metros
   //cambio wering de int a uint32_t 
+
+  //Numero de usuarios por tipo de aplicacion (A,B,C)
   uint32_t num_ues_app_a = 1;
   uint32_t  num_ues_app_b = 2;
   uint32_t num_ues_app_c = 3;
+
+//tamaño de payload de aplicación (32+4+13=49 bytes)
   int packetsize_app_a = 49; // 32 Bytes 5G mMTC payload + 4 Bytes CoAP Header + 13 Bytes DTLS Header // UDP Header and IP Header  are added by NS-3
   int packetsize_app_b = 49;
   int packetsize_app_c = 49;
+
+  //periodo de un dia entre paquetes de la app
   Time packetinterval_app_a = Days(1);
   Time packetinterval_app_b = Days(1);
   Time packetinterval_app_c = Days(1);
-  bool ciot = false;
+
+  //CIoT: habilita optimizaciones de señalización para IoT (p. ej., context resume/suspend).
+  //se aplican por UE en LteUeRrc
+  bool ciot = false; 
   bool edt = false;
-  // Command line arguments
+
+  ConfigStore inputConfig;
+  inputConfig.ConfigureDefaults ();
+  // argumentos de linea de comandos, pasa __FILE__ para que, al hacer --help, muestre el nombre del fichero como referencia.
   CommandLine cmd (__FILE__);
+  //vincula nombres de parámetros a variables por referencia (--simTime=300s --numUeAppA=10 --ciot=1 --edt=1)
   cmd.AddValue ("simTime", "Total duration of the simulation", simTime);
   cmd.AddValue ("simName", "Total duration of the simulation", simName);
   cmd.AddValue ("worker", "worker id when using multithreading to not confuse logging", worker);
@@ -84,21 +96,22 @@ main (int argc, char *argv[])
   cmd.AddValue ("ciot", "Cellular IoT Optimization",ciot);
   cmd.AddValue ("edt", "Early Data Transmission",edt);
   cmd.Parse (argc, argv);
-  ConfigStore inputConfig;
-  inputConfig.ConfigureDefaults ();
-
-  // parse again so you can override default values from the command line
-
+  
+  //se instancias los helperes necesarios para la simulacion (LTE y EPC)
   Ptr<LteHelper> lteHelper = CreateObject<LteHelper> ();
-  Ptr<PointToPointEpcHelper> epcHelper = CreateObject<PointToPointEpcHelper> ();
+  Ptr<PointToPointEpcHelper> epcHelper = CreateObject<PointToPointEpcHelper> (); //EPC mínimo (MME/SGW/PGW) y el backhaul P2P
+
+  //se configura el modelo de propagacion y otros parametros del helper LTE
   lteHelper->SetEpcHelper (epcHelper);
-  lteHelper->EnableRrcLogging ();
+  lteHelper->EnableRrcLogging (); //transiciones de estado, eventos RA/EDT/CIoT).
   lteHelper->SetEnbAntennaModelType ("ns3::IsotropicAntennaModel");
   lteHelper->SetUeAntennaModelType ("ns3::IsotropicAntennaModel");
   lteHelper->SetAttribute ("PathlossModel", StringValue ("ns3::WinnerPlusPropagationLossModel")); // Note that the Winner+ pathloss model isn't available in the current release of ns3. It can be downloaded at https://github.com/tudo-cni/ns3-propagation-winner-plus
   lteHelper->SetPathlossModelAttribute ("HeightBasestation", DoubleValue (50));
   lteHelper->SetPathlossModelAttribute ("Environment", EnumValue (UMaEnvironment));
   lteHelper->SetPathlossModelAttribute ("LineOfSight", BooleanValue (false));
+
+  //Se desactiva el el modelo ideal de RRC y los modelos de error en la capa física
   Config::SetDefault ("ns3::LteHelper::UseIdealRrc", BooleanValue (false));
   Config::SetDefault ("ns3::LteSpectrumPhy::CtrlErrorModelEnabled", BooleanValue (false));
   Config::SetDefault ("ns3::LteSpectrumPhy::DataErrorModelEnabled", BooleanValue (false));
@@ -136,7 +149,7 @@ main (int argc, char *argv[])
   enbNodes.Create (1);
   // Install Mobility Model
   Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator> ();
-  positionAlloc->Add (Vector (cellsize/2, cellsize/2, 25)); // Place our single eNb right in the center of the cell
+  positionAlloc->Add (Vector (cellsize/2, cellsize/2, 25)); // PColoque nuestro único eNb justo en el centro de la celda.
 
   MobilityHelper mobilityEnb;
   mobilityEnb.SetMobilityModel("ns3::ConstantPositionMobilityModel");
@@ -233,13 +246,13 @@ main (int argc, char *argv[])
   
   
   // Set up the data transmission for the Pre-Run
-  for (uint16_t i = 0; i < ues_to_consider; i++)
+  for (uint16_t i = 0; i < ues_to_consider; i++) //se recorre el primer tercio de los ues
     {
-      int access = RaUeUniformVariable->GetInteger (50, simTime.GetMilliSeconds());
+      int access = RaUeUniformVariable->GetInteger (50, simTime.GetMilliSeconds()); //acceso aleatorio entre 50ms y el tiempo de simulacion
       lteHelper->AttachSuspendedNb(ueLteDevs.Get(i), enbLteDevs.Get(0));
 
-      Ptr<LteUeNetDevice> ueLteDevice = ueLteDevs.Get(i)->GetObject<LteUeNetDevice> ();
-      Ptr<LteUeRrc> ueRrc = ueLteDevice->GetRrc();
+      Ptr<LteUeNetDevice> ueLteDevice = ueLteDevs.Get(i)->GetObject<LteUeNetDevice> ();//se obtiene el puntero al dispositivo LTE del UE
+      Ptr<LteUeRrc> ueRrc = ueLteDevice->GetRrc(); //se obtiene el puntero al RRC del UE
       if(ciot == true){
         //std::cout << "ciot" << std::endl;
         ueRrc->SetAttribute("CIoT-Opt", BooleanValue(true));
@@ -255,7 +268,7 @@ main (int argc, char *argv[])
         ueRrc->SetAttribute("EDT", BooleanValue(false));
       }
 
-      ++ulPort;
+      ++ulPort; //se incrementa el puerto para el siguiente UE
       UdpEchoServerHelper server (ulPort);
       serverApps.Add(server.Install (remoteHost));
       //
@@ -434,22 +447,29 @@ main (int argc, char *argv[])
 
 
 
-
-  auto start = std::chrono::system_clock::now(); 
-  std::time_t start_time = std::chrono::system_clock::to_time_t(start);
+//preparacion de logs
+  auto start = std::chrono::system_clock::now(); // toma la hora del sistema
+  std::time_t start_time = std::chrono::system_clock::to_time_t(start); //convierte time_point a time_t para formateo y tiempo legible
   std::cout << "started computation at " << std::ctime(&start_time);
-     std::string logdir = "logs/";
+  
+  //prepara nombre de carpeta y comando para crearlas sin error si ya existen
+  std::string logdir = "logs/";
   std::string makedir = "mkdir -p ";
   std::string techdir = makedir;
 
+  //ejecuta el comando mkdir -p logs/
   techdir += logdir;
   int z = std::system(techdir.c_str());
-  std::cout << z;
+  std::cout << z; // 0 si se ha ejecutado bien
+
+  //Crea logs/<simName>/
   techdir += "/";
   techdir += simName;
   techdir += "/";
   z = std::system(techdir.c_str());
-  std::cout << z;
+  std::cout << z; // 0 si se ha ejecutado bien
+
+
   logdir += simName;
   logdir += "/";
   logdir += std::to_string(ueNodes.GetN());
@@ -460,14 +480,19 @@ main (int argc, char *argv[])
   logdir += "_";
   logdir += std::to_string(edt);
   
+  //Crea logs/<simName>/<ueNodes>_<simTime>_<ciot>_<edt>/
   std::string top_dirmakedir = makedir+logdir; 
   int a = std::system(top_dirmakedir.c_str());
   std::cout << a << std::endl;
-  logdir += "/";
+  logdir += "/"; // añade el "/" final para seguir anidando
+
   
+  //Formatea la fecha/hora local como dd_mm_YYYY_HH_MM_SS para hacer un sufijo único.
   auto tm = *std::localtime(&start_time);
   std::stringstream ss;
   ss << std::put_time(&tm, "%d_%m_%Y_%H_%M_%S");
+
+  //Completa la carpeta final: .../<timestamp>_<worker>_<seed>_/
   logdir += ss.str();
   logdir += "_";
   logdir += std::to_string(worker);
@@ -495,11 +520,15 @@ main (int argc, char *argv[])
 
   Simulator::Stop (3*simTime); // Pre-Run, Run, Post-Run
   Simulator::Run ();
+
+  //Cronometra tiempo de pared
   auto end = std::chrono::system_clock::now();
   std::chrono::duration<double> elapsed_seconds = end-start;
   std::time_t end_time = std::chrono::system_clock::to_time_t(end);
   std::cout << "finished computation at " << std::ctime(&end_time)
               << "elapsed time: " << elapsed_seconds.count() << "s\n";
+
+
   Simulator::Destroy ();
   return 0;
 }

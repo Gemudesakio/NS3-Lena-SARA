@@ -415,9 +415,40 @@ LteEnbMac::GetTypeId (void)
           .AddAttribute ("ComponentCarrierId",
                          "ComponentCarrier Id, needed to reply on the appropriate sap.",
                          UintegerValue (0), MakeUintegerAccessor (&LteEnbMac::m_componentCarrierId),
-                         MakeUintegerChecker<uint8_t> (0, 4));
+                         MakeUintegerChecker<uint8_t> (0, 4))
+  //================================ Nuevos atributos para NB-IoT SARA ===================================
+          .AddAttribute ("SaraActivated",
+            "Enable SARA collision detector and group RARs.",
+            BooleanValue (false),
+            MakeBooleanAccessor (&LteEnbMac::m_saraActivated),
+            MakeBooleanChecker ())
 
-  return tid;
+          .AddAttribute ("SaraTpr",
+            "SARA true-positive probability for 2-UE collision detection [0..1].",
+            DoubleValue (0.975),
+            MakeDoubleAccessor (&LteEnbMac::m_saraTpr),
+            MakeDoubleChecker<double> (0.0, 1.0))
+
+          .AddAttribute ("SaraFpr",
+            "SARA false-positive probability for non-collision [0..1].",
+            DoubleValue (0.001),
+            MakeDoubleAccessor (&LteEnbMac::m_saraFpr),
+            MakeDoubleChecker<double> (0.0, 1.0))
+
+          .AddAttribute ("SaraMaxGroupSize",
+            "Max UEs grouped per RAPID when SARA detects a collision.",
+            UintegerValue (2),
+            MakeUintegerAccessor (&LteEnbMac::m_saraMaxGroupSize),
+            MakeUintegerChecker<uint8_t> (1, 8))
+
+          .AddAttribute ("SaraDuplicateRar",
+            "If true, emit duplicated RAR SDUs for group case (easier tracing).",
+            BooleanValue (true),
+            MakeBooleanAccessor (&LteEnbMac::m_saraDuplicateRar),
+            MakeBooleanChecker ());
+
+
+            return tid;
 }
 
 LteEnbMac::LteEnbMac () : m_ccmMacSapUser (0)
@@ -430,6 +461,21 @@ LteEnbMac::LteEnbMac () : m_ccmMacSapUser (0)
   m_enbPhySapUser = new EnbMacMemberLteEnbPhySapUser (this);
   m_ccmMacSapProvider = new MemberLteCcmMacSapProvider<LteEnbMac> (this);
   m_dropPreambleCollision = true;
+  
+   // --- SARA: defaults coherentes con los atributos registrados ---
+  m_saraActivated     = false;
+  m_saraTpr           = 0.975;
+  m_saraFpr           = 0.001;
+  m_saraMaxGroupSize  = 2;
+  m_saraDuplicateRar  = true;
+
+  if (m_saraRng == 0)
+    {
+      m_saraRng = CreateObject<UniformRandomVariable> ();
+      m_saraRng->SetAttribute ("Min", DoubleValue (0.0));
+      m_saraRng->SetAttribute ("Max", DoubleValue (1.0));
+    }
+
 }
 
 LteEnbMac::~LteEnbMac ()
