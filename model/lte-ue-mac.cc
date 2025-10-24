@@ -1361,6 +1361,12 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
               for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
                    it != rarMsg->RarListEnd (); ++it)
                 {
+                  // === LOG SARA (SOLO IMPRESIÓN; SIN CAMBIAR LA LÓGICA) ===
+                  NS_LOG_INFO ("UE RAR rx (NB): RA-RNTI=" << (uint32_t) rarMsg->GetRaRnti()
+                              << " RAPID=" << (uint32_t) it->rapId
+                              << " TCRNTI=" << it->cellRnti
+                              << " SARA[group=" << (it->saraGroup ? "1":"0")
+                              << ", size=" << (uint32_t) it->saraGroupSize << "]");
                   if (it->rapId == NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) +
                                        m_raPreambleId) // RAR is for me
                     {

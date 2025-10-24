@@ -892,6 +892,11 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
                   // capamos a m_saraMaxGroupSize (normalmente =2) para el primer milestone.
                   const uint8_t groupSize = std::min<uint8_t> (m_saraMaxGroupSize, 2);
 
+                   // LOG 1: anuncio de generación de RAR(es) de grupo
+                  NS_LOG_INFO ("eNB SARA: generar " << int(groupSize)
+                              << " RAR para RAPID=" << int(rapid)
+                              << " RA-RNTI=" << ranti);
+
                   for (uint8_t n = 0; n < groupSize; ++n)
                     {
                       NbIotRrcSap::Rar rar;
@@ -907,6 +912,12 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
 
                       // Encolar SIEMPRE en m_rarQueue (¡no dejes RARs huérfanos!)
                       m_rarQueue.push_back (std::make_pair (ranti, rar));
+
+                       // LOG 2: confirmación de cada RAR encolado
+                      NS_LOG_INFO ("eNB RAR encolado: RAPID=" << int(rar.rapId)
+                                  << " TCRNTI=" << rar.cellRnti
+                                  << " SARA[group=1, size=" << int(groupSize)
+                                  << ", tag=" << int(n) << "]");
 
                       // Guarda CE por RNTI (igual que en el flujo normal)
                       m_RntiCeMap.insert (std::make_pair (rar.cellRnti, ce.coverageEnhancementLevel));
