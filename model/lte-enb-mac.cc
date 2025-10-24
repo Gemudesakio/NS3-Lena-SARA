@@ -442,6 +442,12 @@ LteEnbMac::GetTypeId (void)
             MakeUintegerAccessor (&LteEnbMac::m_saraMaxGroupSize),
             MakeUintegerChecker<uint8_t> (1, 8))
 
+          .AddAttribute ("DropPreambleCollision",
+                "If true, the eNB discards preambles when a collision is detected "
+                "(legacy NB-IoT behavior). If false, collisions are processed (required for SARA).",
+                BooleanValue (true),   // valor por defecto
+                MakeBooleanAccessor (&LteEnbMac::m_dropPreambleCollision),
+                MakeBooleanChecker ());
             return tid;
 }
 
