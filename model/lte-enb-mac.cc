@@ -46,6 +46,7 @@
 #include "nb-iot-data-volume-and-power-headroom-tag.h"
 #include "nb-iot-buffer-status-report-tag.h"
 #include "lte-rlc-am-header.h"
+#include "ns3/random-variable-stream.h"   // << NECESARIO para UniformRandomVariable
 
 #include <algorithm>
 #include <fstream>
@@ -441,13 +442,6 @@ LteEnbMac::GetTypeId (void)
             MakeUintegerAccessor (&LteEnbMac::m_saraMaxGroupSize),
             MakeUintegerChecker<uint8_t> (1, 8))
 
-          .AddAttribute ("SaraDuplicateRar",
-            "If true, emit duplicated RAR SDUs for group case (easier tracing).",
-            BooleanValue (true),
-            MakeBooleanAccessor (&LteEnbMac::m_saraDuplicateRar),
-            MakeBooleanChecker ());
-
-
             return tid;
 }
 
@@ -467,7 +461,6 @@ LteEnbMac::LteEnbMac () : m_ccmMacSapUser (0)
   m_saraTpr           = 0.975;
   m_saraFpr           = 0.001;
   m_saraMaxGroupSize  = 2;
-  m_saraDuplicateRar  = true;
 
   if (m_saraRng == 0)
     {
@@ -475,7 +468,6 @@ LteEnbMac::LteEnbMac () : m_ccmMacSapUser (0)
       m_saraRng->SetAttribute ("Min", DoubleValue (0.0));
       m_saraRng->SetAttribute ("Max", DoubleValue (1.0));
     }
-
 }
 
 LteEnbMac::~LteEnbMac ()
@@ -485,23 +477,37 @@ LteEnbMac::~LteEnbMac ()
 }
 
 void
-LteEnbMac::DoDispose ()
+LteEnbMac::DoDispose (void)
 {
   NS_LOG_FUNCTION (this);
+ //limpia vartiables de estado
   m_dlCqiReceived.clear ();
   m_ulCqiReceived.clear ();
   m_ulCeReceived.clear ();
   m_dlInfoListReceived.clear ();
   m_ulInfoListReceived.clear ();
   m_miDlHarqProcessesPackets.clear ();
-  m_schedulerNb->DoDispose();
-  delete m_macSapProvider;
-  delete m_cmacSapProvider;
-  delete m_schedSapUser;
-  delete m_cschedSapUser;
-  delete m_enbPhySapUser;
-  delete m_ccmMacSapProvider;
+
+  // SARA: suelta la ref del RNG (smart pointer)
+  m_saraRng = 0;
+
+  // Solo si existe; y nulificar luego
+  if (m_schedulerNb)
+    {
+      m_schedulerNb->DoDispose();
+      m_schedulerNb = nullptr;
+    }
+// Elimina los miembros SAP
+  delete m_macSapProvider;    m_macSapProvider = 0;
+  delete m_cmacSapProvider;   m_cmacSapProvider = 0;
+  delete m_schedSapUser;      m_schedSapUser = 0;
+  delete m_cschedSapUser;     m_cschedSapUser = 0;
+  delete m_enbPhySapUser;     m_enbPhySapUser = 0;
+  delete m_ccmMacSapProvider; m_ccmMacSapProvider = 0;
+
+  Object::DoDispose ();
 }
+
 
 void
 LteEnbMac::SetComponentCarrierId (uint8_t index)
@@ -773,7 +779,6 @@ LteEnbMac::CheckIfPreambleWasReceived (NbIotRrcSap::NprachParametersNb ce, bool 
   //hasta el momento actual
   uint16_t timeSinceOcassion = currentsubframe - startSubframeNprachOccasion;
 
-
   //======= PROCESO 2: CALCULO DEL INSTANTE EXACTO DE MUESTREO =======
 
 //3GPP define dos longitudes de CP para NP‑RACH: ~66.7 µs y ~266.7 µs. El más habitual para CE levels altos es 266.7 µs.
@@ -845,40 +850,91 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
             }
           else if (iter->second > 1)
             {
-
+              // === Log opcional ===
               if (m_mac_logging)
-              {
-                std::string logfile_path = m_logdir+"MAC.log";
-                std::ofstream logfile;
-                logfile.open(logfile_path, std::ios_base::app);
-                logfile  << ",PreambleCollision," << Simulator::Now().GetMilliSeconds() << "\n";
-                logfile.close();
-              }
+                {
+                  std::string logfile_path = m_logdir + "MAC.log";
+                  std::ofstream logfile;
+                  logfile.open (logfile_path, std::ios_base::app);
+                  logfile << ",PreambleCollision," << Simulator::Now ().GetMilliSeconds () << "\n";
+                  logfile.close ();
+                }
 
+              // Si está activado "drop", conserva el comportamiento legacy: descartar
               if (m_dropPreambleCollision)
                 {
                   m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
                   continue;
                 }
+
+              // A partir de aquí: procesar la colisión (k >= 2). En NB-IoT real no conoces k exacto,
+              // pero aquí al menos sabes que hubo >1. Usamos SARA si está activado.
+              m_rapIdCollisionMap[subcarrierOffset + iter->first] = true;
+
+              const uint8_t rapid = subcarrierOffset + iter->first;
+              const uint16_t ranti = m_rapIdRantiMap[rapid];
+
+              bool predictCollision = false;
+
+              if (m_saraActivated)
+                {
+                  // Matriz de confusión: aquí k>=2 => caso "colisión real"
+                  // Detectamos con probabilidad TPR (true positive rate)
+                  double u = m_saraRng->GetValue (0.0, 1.0);
+                  predictCollision = (u < m_saraTpr);
+                }
+              // Si SARA no está activado, predictCollision queda en false (flujo legacy).
+
+              if (predictCollision)
+                {
+                  // --- SARA: "colisión detectada" -> emitir RAR(es) de grupo ---
+                  // Tamaño de grupo (primer hito: 2). Aunque iter->second pueda ser >2,
+                  // capamos a m_saraMaxGroupSize (normalmente =2) para el primer milestone.
+                  const uint8_t groupSize = std::min<uint8_t> (m_saraMaxGroupSize, 2);
+
+                  for (uint8_t n = 0; n < groupSize; ++n)
+                    {
+                      NbIotRrcSap::Rar rar;
+                      rar.cellRnti = m_cmacSapUser->AllocateTemporaryCellRnti ();
+                      rar.rapId = rapid;
+                      rar.rarPayload.cellRnti = rar.cellRnti;
+                      rar.ceLevel = ce.coverageEnhancementLevel;
+
+                      // --- Campos SARA en el RAR ---
+                      rar.saraGroup     = true;
+                      rar.saraGroupSize = groupSize;
+                      rar.saraTag       = n;   // 0,1,... (útil para debug)
+
+                      // Encolar SIEMPRE en m_rarQueue (¡no dejes RARs huérfanos!)
+                      m_rarQueue.push_back (std::make_pair (ranti, rar));
+
+                      // Guarda CE por RNTI (igual que en el flujo normal)
+                      m_RntiCeMap.insert (std::make_pair (rar.cellRnti, ce.coverageEnhancementLevel));
+                    }
+
+                  // Limpiar el conteo de preámbulos de este RAPID (como en legacy)
+                  m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
+                }
               else
                 {
-                  m_rapIdCollisionMap[subcarrierOffset + iter->first] = true;
-                  //NS_BUILD_DEBUG (std::cout << "Preamble received of offset " << int (subcarrierOffset) << " at Subframe " << (10 * (m_frameNo - 1) + (m_subframeNo - 1)) << std::endl);
+                  // --- Flujo legacy (SARA OFF o no se detectó colisión) ---
+                  // En el código original se construía un "rar_dci" local quedando huérfano.
+                  // Lo correcto (y consistente con el flujo de no-colisión) es encolar UN RAR en m_rarQueue.
                   NbIotRrcSap::Rar rar;
                   rar.cellRnti = m_cmacSapUser->AllocateTemporaryCellRnti ();
-                  rar.rapId = subcarrierOffset + iter->first;
+                  rar.rapId = rapid;
                   rar.rarPayload.cellRnti = rar.cellRnti;
-                  rar_dci.isRar = true;
-                  rar_dci.isEdt = edt;
-                  rar_dci.rars.push_back (rar);
-                  rar_dci.ranti = m_rapIdRantiMap[subcarrierOffset + iter->first];
+                  rar.ceLevel = ce.coverageEnhancementLevel;
+
+                  // Sin SARA: estos flags se quedan por defecto (false, 1, 0)
+                  // rar.saraGroup = false; rar.saraGroupSize = 1; rar.saraTag = 0;
+
+                  m_rarQueue.push_back (std::make_pair (ranti, rar));
                   m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
-                  m_RntiCeMap.insert (
-                      std::pair<uint32_t,
-                                NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel> (
-                          rar.cellRnti, ce.coverageEnhancementLevel));
+                  m_RntiCeMap.insert (std::make_pair (rar.cellRnti, ce.coverageEnhancementLevel));
                 }
             }
+
         }
       std::vector<NbIotRrcSap::NpdcchMessage> rar_dcis;
       if (m_rarQueue.size () > 0)

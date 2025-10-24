@@ -30,7 +30,6 @@
 #include <ns3/ff-mac-common.h>
 #include <ns3/lte-rrc-sap.h>
 #include <list>
-
 #include "nb-iot-rrc-sap.h"
 
 namespace ns3 {

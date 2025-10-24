@@ -44,9 +44,9 @@
 #include <ns3/lte-ccm-mac-sap.h>
 #include "nb-iot-rrc-sap.h"
 #include "nb-iot-scheduler.h"
+#include "ns3/random-variable-stream.h"   // << NECESARIO para UniformRandomVariable
 
 namespace ns3 {
-
 class DlCqiLteControlMessage;
 class UlCqiLteControlMessage;
 class PdcchMapLteControlMessage;
@@ -573,7 +573,6 @@ private:
   double m_saraTpr;                     // True Positive rate (p.ej. 0.975)
   double m_saraFpr;                     // False Positive rate (p.ej. 0.001)
   uint8_t m_saraMaxGroupSize;           // Tamaño de grupo (primer hito: 2)
-  bool m_saraDuplicateRar;              // Duplicar SDUs en RAR para traza
   Ptr<UniformRandomVariable> m_saraRng; // RNG local para el detector
   };
 

@@ -860,14 +860,18 @@ class NbIotRrcSap{
             NbIotRrcSap::UlGrant ulGrant;
         }; 
         struct Rar
-
         {
-            uint8_t rapId; ///< RAPID
+            uint8_t  rapId;   ///< RAPID
             uint16_t cellRnti;
             NprachParametersNb::CoverageEnhancementLevel ceLevel;
-            //BuildRarListElement_s rarPayload; ///< RAR payload
             RarPayload rarPayload;
+
+            // --- SARA extensions (solo usados si SaraActivated == true en eNB) ---
+            bool     saraGroup     = false;  ///< true si pertenece a grupo SARA
+            uint8_t  saraGroupSize = 1;      ///< tamaño del grupo (1 = normal)
+            uint8_t  saraTag       = 0;      ///< opcional, útil para logs o depuración
         };
+
 
 
         struct NpdcchMessage{
