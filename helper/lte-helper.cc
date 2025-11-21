@@ -762,206 +762,225 @@ LteHelper::InstallSingleEnbDevice (Ptr<Node> n)
   return dev;
 }
 
-Ptr<NetDevice>
-LteHelper::InstallSingleUeDevice (Ptr<Node> n)
-{
-  NS_LOG_FUNCTION (this);
+Ptr<NetDevice>                                                                  // (1)
+LteHelper::InstallSingleUeDevice (Ptr<Node> n)                                  // (2)
+{                                                                               // (3)
+  NS_LOG_FUNCTION (this);                                                       // (4)
 
-  Ptr<LteUeNetDevice> dev = m_ueNetDeviceFactory.Create<LteUeNetDevice> ();
+  Ptr<LteUeNetDevice> dev = m_ueNetDeviceFactory.Create<LteUeNetDevice> ();     // (5)
 
-  // Initialize the component carriers with default values in order to initialize MACs and PHYs
-  // of each component carrier. These values must be updated once the UE is attached to the
-  // eNB and receives RRC Connection Reconfiguration message. In case of primary carrier or
-  // a single carrier, these values will be updated once the UE will receive SIB2 and MIB.
-  NS_ABORT_MSG_IF (m_componentCarrierPhyParams.size() != 0, "CC map is not clean");
-  DoComponentCarrierConfigure (dev->GetDlEarfcn () + 18000, dev->GetDlEarfcn (), 25, 25);
-  NS_ABORT_MSG_IF (m_componentCarrierPhyParams.size() != m_noOfCcs,
-                   "CC map size (" << m_componentCarrierPhyParams.size () <<
-                   ") must be equal to number of carriers (" <<
-                   m_noOfCcs << ")");
+  // Initialize CCs (Component Carriers) con valores por defecto                // (6)
+  NS_ABORT_MSG_IF (m_componentCarrierPhyParams.size() != 0, "CC map is not clean"); // (7)
+  DoComponentCarrierConfigure (dev->GetDlEarfcn () + 18000,                     // (8)
+                               dev->GetDlEarfcn (), 25, 25);                    // (9)
+  NS_ABORT_MSG_IF (m_componentCarrierPhyParams.size() != m_noOfCcs,             // (10)
+                   "CC map size (" << m_componentCarrierPhyParams.size () <<    // (11)
+                   ") must be equal to number of carriers (" <<                 // (12)
+                   m_noOfCcs << ")");                                           // (13)
 
-  std::map<uint8_t, Ptr<ComponentCarrierUe> > ueCcMap;
+  std::map<uint8_t, Ptr<ComponentCarrierUe> > ueCcMap;                          // (14)
 
-  for (std::map< uint8_t, ComponentCarrier >::iterator it = m_componentCarrierPhyParams.begin();
-       it != m_componentCarrierPhyParams.end();
-       ++it)
-    {
-      Ptr <ComponentCarrierUe> cc = CreateObject<ComponentCarrierUe> ();
-      cc->SetUlBandwidth (it->second.GetUlBandwidth ());
-      cc->SetDlBandwidth (it->second.GetDlBandwidth ());
-      cc->SetDlEarfcn (it->second.GetDlEarfcn ());
-      cc->SetUlEarfcn (it->second.GetUlEarfcn ());
-      cc->SetAsPrimary (it->second.IsPrimary ());
-      Ptr<LteUeMac> mac = CreateObject<LteUeMac> ();
-      cc->SetMac (mac);
-      // cc->GetPhy ()->Initialize (); // it is initialized within the LteUeNetDevice::DoInitialize ()
-      ueCcMap.insert (std::pair<uint8_t, Ptr<ComponentCarrierUe> > (it->first, cc));
-    }
-  // CC map is not needed anymore
-  m_componentCarrierPhyParams.clear ();
+  for (std::map< uint8_t, ComponentCarrier >::iterator it =                     // (15)
+         m_componentCarrierPhyParams.begin();                                   // (16)
+       it != m_componentCarrierPhyParams.end();                                 // (17)
+       ++it)                                                                    // (18)
+    {                                                                           // (19)
+      Ptr <ComponentCarrierUe> cc = CreateObject<ComponentCarrierUe> ();        // (20)
+      cc->SetUlBandwidth (it->second.GetUlBandwidth ());                        // (21)
+      cc->SetDlBandwidth (it->second.GetDlBandwidth ());                        // (22)
+      cc->SetDlEarfcn (it->second.GetDlEarfcn ());                              // (23)
+      cc->SetUlEarfcn (it->second.GetUlEarfcn ());                              // (24)
+      cc->SetAsPrimary (it->second.IsPrimary ());                               // (25)
+      Ptr<LteUeMac> mac = CreateObject<LteUeMac> ();                            // (26)
+      cc->SetMac (mac);                                                         // (27)
+      // cc->GetPhy ()->Initialize (); // se inicializa en LteUeNetDevice::DoInitialize() // (28)
+      ueCcMap.insert (std::pair<uint8_t, Ptr<ComponentCarrierUe> >              // (29)
+                      (it->first, cc));                                         // (30)
+    }                                                                           // (31)
 
-  for (std::map<uint8_t, Ptr<ComponentCarrierUe> >::iterator it = ueCcMap.begin (); it != ueCcMap.end (); ++it)
-    {
-      Ptr<LteSpectrumPhy> dlPhy = CreateObject<LteSpectrumPhy> ();
-      Ptr<LteSpectrumPhy> ulPhy = CreateObject<LteSpectrumPhy> ();
+  m_componentCarrierPhyParams.clear ();                                         // (32)
 
-      Ptr<LteUePhy> phy = CreateObject<LteUePhy> (dlPhy, ulPhy);
+  for (std::map<uint8_t, Ptr<ComponentCarrierUe> >::iterator it =               // (33)
+         ueCcMap.begin (); it != ueCcMap.end (); ++it)                          // (34)
+    {                                                                           // (35)
+      Ptr<LteSpectrumPhy> dlPhy = CreateObject<LteSpectrumPhy> ();              // (36)
+      Ptr<LteSpectrumPhy> ulPhy = CreateObject<LteSpectrumPhy> ();              // (37)
 
-      Ptr<LteHarqPhy> harq = Create<LteHarqPhy> ();
-      dlPhy->SetHarqPhyModule (harq);
-      ulPhy->SetHarqPhyModule (harq);
-      phy->SetHarqPhyModule (harq);
+      Ptr<LteUePhy> phy = CreateObject<LteUePhy> (dlPhy, ulPhy);                // (38)
 
-      Ptr<LteChunkProcessor> pRs = Create<LteChunkProcessor> ();
-      pRs->AddCallback (MakeCallback (&LteUePhy::ReportRsReceivedPower, phy));
-      dlPhy->AddRsPowerChunkProcessor (pRs);
+      Ptr<LteHarqPhy> harq = Create<LteHarqPhy> ();                             // (39)
+      dlPhy->SetHarqPhyModule (harq);                                           // (40)
+      ulPhy->SetHarqPhyModule (harq);                                           // (41)
+      phy->SetHarqPhyModule (harq);                                             // (42)
 
-      Ptr<LteChunkProcessor> pInterf = Create<LteChunkProcessor> ();
-      pInterf->AddCallback (MakeCallback (&LteUePhy::ReportInterference, phy));
-      dlPhy->AddInterferenceCtrlChunkProcessor (pInterf);   // for RSRQ evaluation of UE Measurements
+      Ptr<LteChunkProcessor> pRs = Create<LteChunkProcessor> ();                // (43)
+      pRs->AddCallback (MakeCallback (&LteUePhy::ReportRsReceivedPower, phy));  // (44)
+      dlPhy->AddRsPowerChunkProcessor (pRs);                                    // (45)
 
-      Ptr<LteChunkProcessor> pCtrl = Create<LteChunkProcessor> ();
-      pCtrl->AddCallback (MakeCallback (&LteSpectrumPhy::UpdateSinrPerceived, dlPhy));
-      dlPhy->AddCtrlSinrChunkProcessor (pCtrl);
+      Ptr<LteChunkProcessor> pInterf = Create<LteChunkProcessor> ();            // (46)
+      pInterf->AddCallback (MakeCallback (&LteUePhy::ReportInterference, phy)); // (47)
+      dlPhy->AddInterferenceCtrlChunkProcessor (pInterf);                       // (48)
 
-      Ptr<LteChunkProcessor> pData = Create<LteChunkProcessor> ();
-      pData->AddCallback (MakeCallback (&LteSpectrumPhy::UpdateSinrPerceived, dlPhy));
-      dlPhy->AddDataSinrChunkProcessor (pData);
+      Ptr<LteChunkProcessor> pCtrl = Create<LteChunkProcessor> ();              // (49)
+      pCtrl->AddCallback (MakeCallback (&LteSpectrumPhy::UpdateSinrPerceived, dlPhy)); // (50)
+      dlPhy->AddCtrlSinrChunkProcessor (pCtrl);                                 // (51)
 
-      if (m_usePdschForCqiGeneration)
-        {
-          // CQI calculation based on PDCCH for signal and PDSCH for interference
-          //NOTE: Change in pCtrl chunk processor could impact the RLF detection
-          //since it is based on CTRL SINR.
-          pCtrl->AddCallback (MakeCallback (&LteUePhy::GenerateMixedCqiReport, phy));
-          Ptr<LteChunkProcessor> pDataInterf = Create<LteChunkProcessor> ();
-          pDataInterf->AddCallback (MakeCallback (&LteUePhy::ReportDataInterference, phy));
-          dlPhy->AddInterferenceDataChunkProcessor (pDataInterf);
-        }
-      else
-        {
-          // CQI calculation based on PDCCH for both signal and interference
-          pCtrl->AddCallback (MakeCallback (&LteUePhy::GenerateCtrlCqiReport, phy));
-        }
+      Ptr<LteChunkProcessor> pData = Create<LteChunkProcessor> ();              // (52)
+      pData->AddCallback (MakeCallback (&LteSpectrumPhy::UpdateSinrPerceived, dlPhy)); // (53)
+      dlPhy->AddDataSinrChunkProcessor (pData);                                 // (54)
 
-      dlPhy->SetChannel (m_downlinkChannel);
-      ulPhy->SetChannel (m_uplinkChannel);
+      if (m_usePdschForCqiGeneration)                                           // (55)
+        {                                                                       // (56)
+          pCtrl->AddCallback (MakeCallback (&LteUePhy::GenerateMixedCqiReport, phy)); // (57)
+          Ptr<LteChunkProcessor> pDataInterf = Create<LteChunkProcessor> ();    // (58)
+          pDataInterf->AddCallback (MakeCallback (&LteUePhy::ReportDataInterference, phy)); // (59)
+          dlPhy->AddInterferenceDataChunkProcessor (pDataInterf);               // (60)
+        }                                                                       // (61)
+      else                                                                      // (62)
+        {                                                                       // (63)
+          pCtrl->AddCallback (MakeCallback (&LteUePhy::GenerateCtrlCqiReport, phy)); // (64)
+        }                                                                       // (65)
 
-      Ptr<MobilityModel> mm = n->GetObject<MobilityModel> ();
-      NS_ASSERT_MSG (mm, "MobilityModel needs to be set on node before calling LteHelper::InstallUeDevice ()");
-      dlPhy->SetMobility (mm);
-      ulPhy->SetMobility (mm);
+      dlPhy->SetChannel (m_downlinkChannel);                                    // (66)
+      ulPhy->SetChannel (m_uplinkChannel);                                      // (67)
 
-      Ptr<AntennaModel> antenna = (m_ueAntennaModelFactory.Create ())->GetObject<AntennaModel> ();
-      NS_ASSERT_MSG (antenna, "error in creating the AntennaModel object");
-      dlPhy->SetAntenna (antenna);
-      ulPhy->SetAntenna (antenna);
+      Ptr<MobilityModel> mm = n->GetObject<MobilityModel> ();                   // (68)
+      NS_ASSERT_MSG (mm, "MobilityModel needs to be set on node before calling LteHelper::InstallUeDevice ()"); // (69)
+      dlPhy->SetMobility (mm);                                                  // (70)
+      ulPhy->SetMobility (mm);                                                  // (71)
 
-      it->second->SetPhy(phy);
-    }
-  Ptr<LteUeComponentCarrierManager> ccmUe = m_ueComponentCarrierManagerFactory.Create<LteUeComponentCarrierManager> ();
+      Ptr<AntennaModel> antenna = (m_ueAntennaModelFactory.Create ())->GetObject<AntennaModel> (); // (72)
+      NS_ASSERT_MSG (antenna, "error in creating the AntennaModel object");    // (73)
+      dlPhy->SetAntenna (antenna);                                             // (74)
+      ulPhy->SetAntenna (antenna);                                             // (75)
 
-  Ptr<LteUeRrc> rrc = CreateObject<LteUeRrc> ();
-  rrc->SetLteMacSapProvider (ccmUe->GetLteMacSapProvider ());
-  // setting ComponentCarrierManager SAP
-  rrc->SetLteCcmRrcSapProvider (ccmUe->GetLteCcmRrcSapProvider ());
-  ccmUe->SetLteCcmRrcSapUser (rrc->GetLteCcmRrcSapUser ());
-  // Set number of component carriers. Note: UE CCM would also set the
-  // number of component carriers in UE RRC
-  ccmUe->SetNumberOfComponentCarriers (m_noOfCcs);
+      it->second->SetPhy(phy);                                                 // (76)
+    }                                                                           // (77)
 
-  // run intializeSap to create the proper number of MAC and PHY control sap provider/users
-   rrc->InitializeSap();
+  Ptr<LteUeComponentCarrierManager> ccmUe =                                     // (78)
+      m_ueComponentCarrierManagerFactory.Create<LteUeComponentCarrierManager> (); // (79)
 
-  if (m_useIdealRrc)
-    {
-      Ptr<LteUeRrcProtocolIdeal> rrcProtocol = CreateObject<LteUeRrcProtocolIdeal> ();
-      rrcProtocol->SetUeRrc (rrc);
-      rrc->AggregateObject (rrcProtocol);
-      rrcProtocol->SetLteUeRrcSapProvider (rrc->GetLteUeRrcSapProvider ());
-      rrc->SetLteUeRrcSapUser (rrcProtocol->GetLteUeRrcSapUser ());
-    }
-  else
-    {
-      Ptr<LteUeRrcProtocolReal> rrcProtocol = CreateObject<LteUeRrcProtocolReal> ();
-      rrcProtocol->SetUeRrc (rrc);
-      rrc->AggregateObject (rrcProtocol);
-      rrcProtocol->SetLteUeRrcSapProvider (rrc->GetLteUeRrcSapProvider ());
-      rrc->SetLteUeRrcSapUser (rrcProtocol->GetLteUeRrcSapUser ());
-    }
+  Ptr<LteUeRrc> rrc = CreateObject<LteUeRrc> ();                                // (80)
+  rrc->SetLteMacSapProvider (ccmUe->GetLteMacSapProvider ());                   // (81)
+  rrc->SetLteCcmRrcSapProvider (ccmUe->GetLteCcmRrcSapProvider ());             // (82)
+  ccmUe->SetLteCcmRrcSapUser (rrc->GetLteCcmRrcSapUser ());                     // (83)
+  ccmUe->SetNumberOfComponentCarriers (m_noOfCcs);                              // (84)
 
-  if (m_epcHelper != 0)
-    {
-      rrc->SetUseRlcSm (false);
-    }
-  Ptr<EpcUeNas> nas = CreateObject<EpcUeNas> ();
- 
-  nas->SetAsSapProvider (rrc->GetAsSapProvider ());
-  rrc->SetAsSapUser (nas->GetAsSapUser ());
+  rrc->InitializeSap();                                                         // (85)
 
-  for (std::map<uint8_t, Ptr<ComponentCarrierUe> >::iterator it = ueCcMap.begin (); it != ueCcMap.end (); ++it)
-    {
-      rrc->SetLteUeCmacSapProvider (it->second->GetMac ()->GetLteUeCmacSapProvider (), it->first);
-      it->second->GetMac ()->SetLteUeCmacSapUser (rrc->GetLteUeCmacSapUser (it->first));
-      it->second->GetMac ()->SetComponentCarrierId (it->first);
+  if (m_useIdealRrc)                                                            // (86)
+    {                                                                           // (87)
+      Ptr<LteUeRrcProtocolIdeal> rrcProtocol = CreateObject<LteUeRrcProtocolIdeal> (); // (88)
+      rrcProtocol->SetUeRrc (rrc);                                              // (89)
+      rrc->AggregateObject (rrcProtocol);                                       // (90)
+      rrcProtocol->SetLteUeRrcSapProvider (rrc->GetLteUeRrcSapProvider ());     // (91)
+      rrc->SetLteUeRrcSapUser (rrcProtocol->GetLteUeRrcSapUser ());             // (92)
+    }                                                                           // (93)
+  else                                                                          // (94)
+    {                                                                           // (95)
+      Ptr<LteUeRrcProtocolReal> rrcProtocol = CreateObject<LteUeRrcProtocolReal> (); // (96)
+      rrcProtocol->SetUeRrc (rrc);                                              // (97)
+      rrc->AggregateObject (rrcProtocol);                                       // (98)
+      rrcProtocol->SetLteUeRrcSapProvider (rrc->GetLteUeRrcSapProvider ());     // (99)
+      rrc->SetLteUeRrcSapUser (rrcProtocol->GetLteUeRrcSapUser ());             // (100)
+    }                                                                           // (101)
 
-      it->second->GetPhy ()->SetLteUeCphySapUser (rrc->GetLteUeCphySapUser (it->first));
-      rrc->SetLteUeCphySapProvider (it->second->GetPhy ()->GetLteUeCphySapProvider (), it->first);
-      it->second->GetPhy ()->SetComponentCarrierId (it->first);
-      it->second->GetPhy ()->SetLteUePhySapUser (it->second->GetMac ()->GetLteUePhySapUser ());
-      it->second->GetMac ()->SetLteUePhySapProvider (it->second->GetPhy ()->GetLteUePhySapProvider ());
+  if (m_epcHelper != 0)                                                         // (102)
+    {                                                                           // (103)
+      rrc->SetUseRlcSm (false);                                                 // (104)
+    }                                                                           // (105)
 
-      bool ccmTest = ccmUe->SetComponentCarrierMacSapProviders (it->first, it->second->GetMac ()->GetLteMacSapProvider());
+  Ptr<EpcUeNas> nas = CreateObject<EpcUeNas> ();                                // (106)
+  nas->SetAsSapProvider (rrc->GetAsSapProvider ());                             // (107)
+  rrc->SetAsSapUser (nas->GetAsSapUser ());                                     // (108)
 
-      if (ccmTest == false)
-        {
-          NS_FATAL_ERROR ("Error in SetComponentCarrierMacSapProviders");
-        }
-    }
+  for (std::map<uint8_t, Ptr<ComponentCarrierUe> >::iterator it =               // (109)
+         ueCcMap.begin (); it != ueCcMap.end (); ++it)                          // (110)
+    {                                                                           // (111)
+      rrc->SetLteUeCmacSapProvider (it->second->GetMac ()->GetLteUeCmacSapProvider (), it->first); // (112)
+      it->second->GetMac ()->SetLteUeCmacSapUser (rrc->GetLteUeCmacSapUser (it->first));           // (113)
+      it->second->GetMac ()->SetComponentCarrierId (it->first);                 // (114)
 
-  NS_ABORT_MSG_IF (m_imsiCounter >= 0xFFFFFFFF, "max num UEs exceeded");
-  uint64_t imsi = ++m_imsiCounter;
+      it->second->GetPhy ()->SetLteUeCphySapUser (rrc->GetLteUeCphySapUser (it->first)); // (115)
+      rrc->SetLteUeCphySapProvider (it->second->GetPhy ()->GetLteUeCphySapProvider (), it->first); // (116)
+      it->second->GetPhy ()->SetComponentCarrierId (it->first);                 // (117)
+      it->second->GetPhy ()->SetLteUePhySapUser (it->second->GetMac ()->GetLteUePhySapUser ());    // (118)
+      it->second->GetMac ()->SetLteUePhySapProvider (it->second->GetPhy ()->GetLteUePhySapProvider ()); // (119)
 
+      bool ccmTest = ccmUe->SetComponentCarrierMacSapProviders (it->first,      // (120)
+                        it->second->GetMac ()->GetLteMacSapProvider());          // (121)
+      if (ccmTest == false)                                                     // (122)
+        {                                                                       // (123)
+          NS_FATAL_ERROR ("Error in SetComponentCarrierMacSapProviders");       // (124)
+        }                                                                       // (125)
+    }                                                                           // (126)
 
-  dev->SetNode (n);
-  dev->SetAttribute ("Imsi", UintegerValue (imsi));
-  dev->SetCcMap (ueCcMap);
-  dev->SetAttribute ("LteUeRrc", PointerValue (rrc));
-  dev->SetAttribute ("EpcUeNas", PointerValue (nas));
-  dev->SetAttribute ("LteUeComponentCarrierManager", PointerValue (ccmUe));
-  // \todo The UE identifier should be dynamically set by the EPC
-  // when the default PDP context is created. This is a simplification.
-  dev->SetAddress (Mac64Address::Allocate ());
+  NS_ABORT_MSG_IF (m_imsiCounter >= 0xFFFFFFFF, "max num UEs exceeded");        // (127)
+  uint64_t imsi = ++m_imsiCounter;                                              // (128)
 
-  for (std::map<uint8_t, Ptr<ComponentCarrierUe> >::iterator it = ueCcMap.begin (); it != ueCcMap.end (); ++it)
-    {
-      Ptr<LteUePhy> ccPhy = it->second->GetPhy ();
-      ccPhy->SetDevice (dev);
-      ccPhy->GetUlSpectrumPhy ()->SetDevice (dev);
-      ccPhy->GetDlSpectrumPhy ()->SetDevice (dev);
-      ccPhy->GetDlSpectrumPhy ()->SetLtePhyRxDataEndOkCallback (MakeCallback (&LteUePhy::PhyPduReceived, ccPhy));
-      ccPhy->GetDlSpectrumPhy ()->SetLtePhyRxCtrlEndOkCallback (MakeCallback (&LteUePhy::ReceiveLteControlMessageList, ccPhy));
-      ccPhy->GetDlSpectrumPhy ()->SetLtePhyRxPssCallback (MakeCallback (&LteUePhy::ReceivePss, ccPhy));
-      ccPhy->GetDlSpectrumPhy ()->SetNbiotPhyRxNpssCallback (MakeCallback (&LteUePhy::ReceiveNpss, ccPhy)); // Nbiot 
-      ccPhy->GetDlSpectrumPhy ()->SetNbiotPhyRxNsssCallback (MakeCallback (&LteUePhy::ReceiveNsss, ccPhy)); // Nbiot
-      ccPhy->GetDlSpectrumPhy ()->SetLtePhyDlHarqFeedbackCallback (MakeCallback (&LteUePhy::EnqueueDlHarqFeedback, ccPhy));
-    }
+  // ======================= [SARA] Inyectar IMSI en MAC(s) ====================// (129)
+  for (std::map<uint8_t, Ptr<ComponentCarrierUe>>::iterator it =                // (130)
+         ueCcMap.begin (); it != ueCcMap.end (); ++it)                          // (131)
+  {                                                                             // (132)
+    Ptr<LteUeMac> mac = it->second->GetMac ();                                  // (133)
+    if (mac)                                                                    // (134)
+    {                                                                           // (135)
+      mac->SetImsi (imsi);                                                      // (136)
+      NS_LOG_INFO ("[HELPER][SARA] IMSI=" << imsi                                // (137)
+                   << " asignado a LteUeMac de CC=" << (uint32_t) it->first);   // (138)
+    }                                                                           // (139)
+    else                                                                        // (140)
+    {                                                                           // (141)
+      NS_LOG_WARN ("[HELPER][SARA] MAC no encontrado para CC="                  // (142)
+                   << (uint32_t) it->first);                                    // (143)
+    }                                                                           // (144)
+  }                                                                             // (145)
+  // ========================================================================== // (146)
 
-  nas->SetDevice (dev);
+  dev->SetNode (n);                                                             // (147)
+  dev->SetAttribute ("Imsi", UintegerValue (imsi));                             // (148)
+  dev->SetCcMap (ueCcMap);                                                      // (149)
+  dev->SetAttribute ("LteUeRrc", PointerValue (rrc));                           // (150)
+  dev->SetAttribute ("EpcUeNas", PointerValue (nas));                           // (151)
+  dev->SetAttribute ("LteUeComponentCarrierManager", PointerValue (ccmUe));     // (152)
+  dev->SetAddress (Mac64Address::Allocate ());                                  // (153)
 
-  n->AddDevice (dev);
+  for (std::map<uint8_t, Ptr<ComponentCarrierUe> >::iterator it =               // (154)
+         ueCcMap.begin (); it != ueCcMap.end (); ++it)                          // (155)
+    {                                                                           // (156)
+      Ptr<LteUePhy> ccPhy = it->second->GetPhy ();                               // (157)
+      ccPhy->SetDevice (dev);                                                   // (158)
+      ccPhy->GetUlSpectrumPhy ()->SetDevice (dev);                              // (159)
+      ccPhy->GetDlSpectrumPhy ()->SetDevice (dev);                              // (160)
+      ccPhy->GetDlSpectrumPhy ()->SetLtePhyRxDataEndOkCallback (                // (161)
+          MakeCallback (&LteUePhy::PhyPduReceived, ccPhy));                     // (162)
+      ccPhy->GetDlSpectrumPhy ()->SetLtePhyRxCtrlEndOkCallback (                // (163)
+          MakeCallback (&LteUePhy::ReceiveLteControlMessageList, ccPhy));       // (164)
+      ccPhy->GetDlSpectrumPhy ()->SetLtePhyRxPssCallback (                      // (165)
+          MakeCallback (&LteUePhy::ReceivePss, ccPhy));                         // (166)
+      ccPhy->GetDlSpectrumPhy ()->SetNbiotPhyRxNpssCallback (                   // (167)
+          MakeCallback (&LteUePhy::ReceiveNpss, ccPhy));                        // (168)
+      ccPhy->GetDlSpectrumPhy ()->SetNbiotPhyRxNsssCallback (                   // (169)
+          MakeCallback (&LteUePhy::ReceiveNsss, ccPhy));                        // (170)
+      ccPhy->GetDlSpectrumPhy ()->SetLtePhyDlHarqFeedbackCallback (             // (171)
+          MakeCallback (&LteUePhy::EnqueueDlHarqFeedback, ccPhy));              // (172)
+    }                                                                           // (173)
 
-  nas->SetForwardUpCallback (MakeCallback (&LteUeNetDevice::Receive, dev));
+  nas->SetDevice (dev);                                                         // (174)
 
-  if (m_epcHelper != 0)
-    {
-      m_epcHelper->AddUe (dev, dev->GetImsi ());
-    }
+  n->AddDevice (dev);                                                           // (175)
 
-  dev->Initialize ();
+  nas->SetForwardUpCallback (MakeCallback (&LteUeNetDevice::Receive, dev));     // (176)
 
-  return dev;
-}
+  if (m_epcHelper != 0)                                                         // (177)
+    {                                                                           // (178)
+      m_epcHelper->AddUe (dev, dev->GetImsi ());                                // (179)
+    }                                                                           // (180)
+
+  dev->Initialize ();                                                           // (181)
+
+  return dev;                                                                   // (182)
+}                                                                               // (183)
 
 
 void

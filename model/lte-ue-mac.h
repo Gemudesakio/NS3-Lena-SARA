@@ -60,6 +60,10 @@ public:
    * \brief Get the type ID.
    * \return the object TypeId
    */
+  
+  // (1) Setter público para inyectar el IMSI al MAC del UE
+  void SetImsi (uint64_t imsi);
+   
   static TypeId GetTypeId (void);
 
   LteUeMac ();
@@ -327,7 +331,7 @@ private:
   std::vector < uint8_t > m_miUlHarqProcessesPacketTimer; ///< timer for packet life in the buffer
 
   uint16_t m_rnti; ///< RNTI
-  uint16_t m_imsi; ///< IMSI
+  uint64_t m_imsi; ///< IMSI
 
   bool m_rachConfigured; ///< is RACH configured?
   bool m_nprachConfigured; ///< is RACH configured?
@@ -345,6 +349,10 @@ private:
   uint32_t m_subframeNo; ///< subframe number
   uint8_t m_raRnti; ///< RA RNTI
   bool m_waitingForRaResponse; ///< waiting for RA response
+  
+  bool    m_saraGroupActive = false; // (1) true si el RAR recibido indica grupo SARA
+  uint8_t m_saraGroupSize   = 1;     // (2) tamaño del grupo SARA (N)
+  uint8_t m_saraTag         = 0;     // (3) etiqueta local del UE en el grupo [0..N-1]
 
   NbIotRrcSap::NprachParametersNb m_CeLevel; // CE Level based on RSRP
   NbIotRrcSap::NprachParametersNb m_CeLevelRapRetries; // CE Level based on RSRP, but might be increased due to RA failures

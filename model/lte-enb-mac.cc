@@ -46,9 +46,12 @@
 #include "nb-iot-data-volume-and-power-headroom-tag.h"
 #include "nb-iot-buffer-status-report-tag.h"
 #include "lte-rlc-am-header.h"
+#include "ns3/random-variable-stream.h"   // << NECESARIO para UniformRandomVariable
 
 #include <algorithm>
 #include <fstream>
+#include "sara-ul-id-tag.h"    // (1) Tag con cd y dmrs para Msg3
+
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("LteEnbMac");
@@ -415,9 +418,39 @@ LteEnbMac::GetTypeId (void)
           .AddAttribute ("ComponentCarrierId",
                          "ComponentCarrier Id, needed to reply on the appropriate sap.",
                          UintegerValue (0), MakeUintegerAccessor (&LteEnbMac::m_componentCarrierId),
-                         MakeUintegerChecker<uint8_t> (0, 4));
+                         MakeUintegerChecker<uint8_t> (0, 4))
+  //================================ Nuevos atributos para NB-IoT SARA ===================================
+          .AddAttribute ("SaraActivated",
+            "Enable SARA collision detector and group RARs.",
+            BooleanValue (false),
+            MakeBooleanAccessor (&LteEnbMac::m_saraActivated),
+            MakeBooleanChecker ())
 
-  return tid;
+          .AddAttribute ("SaraTpr",
+            "SARA true-positive probability for 2-UE collision detection [0..1].",
+            DoubleValue (0.975),
+            MakeDoubleAccessor (&LteEnbMac::m_saraTpr),
+            MakeDoubleChecker<double> (0.0, 1.0))
+
+          .AddAttribute ("SaraFpr",
+            "SARA false-positive probability for non-collision [0..1].",
+            DoubleValue (0.001),
+            MakeDoubleAccessor (&LteEnbMac::m_saraFpr),
+            MakeDoubleChecker<double> (0.0, 1.0))
+
+          .AddAttribute ("SaraMaxGroupSize",
+            "Max UEs grouped per RAPID when SARA detects a collision.",
+            UintegerValue (2),
+            MakeUintegerAccessor (&LteEnbMac::m_saraMaxGroupSize),
+            MakeUintegerChecker<uint8_t> (1, 8))
+
+          .AddAttribute ("DropPreambleCollision",
+                "If true, the eNB discards preambles when a collision is detected "
+                "(legacy NB-IoT behavior). If false, collisions are processed (required for SARA).",
+                BooleanValue (true),   // valor por defecto
+                MakeBooleanAccessor (&LteEnbMac::m_dropPreambleCollision),
+                MakeBooleanChecker ());
+            return tid;
 }
 
 LteEnbMac::LteEnbMac () : m_ccmMacSapUser (0)
@@ -430,6 +463,19 @@ LteEnbMac::LteEnbMac () : m_ccmMacSapUser (0)
   m_enbPhySapUser = new EnbMacMemberLteEnbPhySapUser (this);
   m_ccmMacSapProvider = new MemberLteCcmMacSapProvider<LteEnbMac> (this);
   m_dropPreambleCollision = true;
+  
+   // --- SARA: defaults coherentes con los atributos registrados ---
+  m_saraActivated     = false;
+  m_saraTpr           = 0.975;
+  m_saraFpr           = 0.001;
+  m_saraMaxGroupSize  = 2;
+
+  if (m_saraRng == 0)
+    {
+      m_saraRng = CreateObject<UniformRandomVariable> ();
+      m_saraRng->SetAttribute ("Min", DoubleValue (0.0));
+      m_saraRng->SetAttribute ("Max", DoubleValue (1.0));
+    }
 }
 
 LteEnbMac::~LteEnbMac ()
@@ -439,23 +485,37 @@ LteEnbMac::~LteEnbMac ()
 }
 
 void
-LteEnbMac::DoDispose ()
+LteEnbMac::DoDispose (void)
 {
   NS_LOG_FUNCTION (this);
+ //limpia vartiables de estado
   m_dlCqiReceived.clear ();
   m_ulCqiReceived.clear ();
   m_ulCeReceived.clear ();
   m_dlInfoListReceived.clear ();
   m_ulInfoListReceived.clear ();
   m_miDlHarqProcessesPackets.clear ();
-  m_schedulerNb->DoDispose();
-  delete m_macSapProvider;
-  delete m_cmacSapProvider;
-  delete m_schedSapUser;
-  delete m_cschedSapUser;
-  delete m_enbPhySapUser;
-  delete m_ccmMacSapProvider;
+
+  // SARA: suelta la ref del RNG (smart pointer)
+  m_saraRng = 0;
+
+  // Solo si existe; y nulificar luego
+  if (m_schedulerNb)
+    {
+      m_schedulerNb->DoDispose();
+      m_schedulerNb = nullptr;
+    }
+// Elimina los miembros SAP
+  delete m_macSapProvider;    m_macSapProvider = 0;
+  delete m_cmacSapProvider;   m_cmacSapProvider = 0;
+  delete m_schedSapUser;      m_schedSapUser = 0;
+  delete m_cschedSapUser;     m_cschedSapUser = 0;
+  delete m_enbPhySapUser;     m_enbPhySapUser = 0;
+  delete m_ccmMacSapProvider; m_ccmMacSapProvider = 0;
+
+  Object::DoDispose ();
 }
+
 
 void
 LteEnbMac::SetComponentCarrierId (uint8_t index)
@@ -727,7 +787,6 @@ LteEnbMac::CheckIfPreambleWasReceived (NbIotRrcSap::NprachParametersNb ce, bool 
   //hasta el momento actual
   uint16_t timeSinceOcassion = currentsubframe - startSubframeNprachOccasion;
 
-
   //======= PROCESO 2: CALCULO DEL INSTANTE EXACTO DE MUESTREO =======
 
 //3GPP define dos longitudes de CP para NP‑RACH: ~66.7 µs y ~266.7 µs. El más habitual para CE levels altos es 266.7 µs.
@@ -799,40 +858,102 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
             }
           else if (iter->second > 1)
             {
-
+              // === Log opcional ===
               if (m_mac_logging)
-              {
-                std::string logfile_path = m_logdir+"MAC.log";
-                std::ofstream logfile;
-                logfile.open(logfile_path, std::ios_base::app);
-                logfile  << ",PreambleCollision," << Simulator::Now().GetMilliSeconds() << "\n";
-                logfile.close();
-              }
+                {
+                  std::string logfile_path = m_logdir + "MAC.log";
+                  std::ofstream logfile;
+                  logfile.open (logfile_path, std::ios_base::app);
+                  logfile << ",PreambleCollision," << Simulator::Now ().GetMilliSeconds () << "\n";
+                  logfile.close ();
+                }
 
+              // Si está activado "drop", conserva el comportamiento legacy: descartar
               if (m_dropPreambleCollision)
                 {
                   m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
                   continue;
                 }
+
+              // A partir de aquí: procesar la colisión (k >= 2). En NB-IoT real no conoces k exacto,
+              // pero aquí al menos sabes que hubo >1. Usamos SARA si está activado.
+              m_rapIdCollisionMap[subcarrierOffset + iter->first] = true;
+
+              const uint8_t rapid = subcarrierOffset + iter->first;
+              const uint16_t ranti = m_rapIdRantiMap[rapid];
+
+              bool predictCollision = false;
+
+              if (m_saraActivated)
+                {
+                  // Matriz de confusión: aquí k>=2 => caso "colisión real"
+                  // Detectamos con probabilidad TPR (true positive rate)
+                  double u = m_saraRng->GetValue (0.0, 1.0);
+                  predictCollision = (u < m_saraTpr);
+                }
+              // Si SARA no está activado, predictCollision queda en false (flujo legacy).
+
+              if (predictCollision)
+                {
+                  // --- SARA: "colisión detectada" -> emitir RAR(es) de grupo ---
+                  // Tamaño de grupo (primer hito: 2). Aunque iter->second pueda ser >2,
+                  // capamos a m_saraMaxGroupSize (normalmente =2) para el primer milestone.
+                  const uint8_t groupSize = std::min<uint8_t> (m_saraMaxGroupSize, 2);
+
+                   // LOG 1: anuncio de generación de RAR(es) de grupo
+                  NS_LOG_INFO ("eNB SARA: generar " << int(groupSize)
+                              << " RAR para RAPID=" << int(rapid)
+                              << " RA-RNTI=" << ranti);
+
+                  for (uint8_t n = 0; n < groupSize; ++n)
+                    {
+                      NbIotRrcSap::Rar rar;
+                      rar.cellRnti = m_cmacSapUser->AllocateTemporaryCellRnti ();
+                      rar.rapId = rapid;
+                      rar.rarPayload.cellRnti = rar.cellRnti;
+                      rar.ceLevel = ce.coverageEnhancementLevel;
+
+                      // --- Campos SARA en el RAR ---
+                      rar.saraGroup     = true;
+                      rar.saraGroupSize = groupSize;
+                      rar.saraTag       = n;   // 0,1,... (útil para debug)
+
+                      // Encolar SIEMPRE en m_rarQueue (¡no dejes RARs huérfanos!)
+                      m_rarQueue.push_back (std::make_pair (ranti, rar));
+
+                       // LOG 2: confirmación de cada RAR encolado
+                      NS_LOG_INFO ("eNB RAR encolado: RAPID=" << int(rar.rapId)
+                                  << " TCRNTI=" << rar.cellRnti
+                                  << " SARA[group=1, size=" << int(groupSize)
+                                  << ", tag=" << int(n) << "]");
+
+                      // Guarda CE por RNTI (igual que en el flujo normal)
+                      m_RntiCeMap.insert (std::make_pair (rar.cellRnti, ce.coverageEnhancementLevel));
+                    }
+
+                  // Limpiar el conteo de preámbulos de este RAPID (como en legacy)
+                  m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
+                }
               else
                 {
-                  m_rapIdCollisionMap[subcarrierOffset + iter->first] = true;
-                  //NS_BUILD_DEBUG (std::cout << "Preamble received of offset " << int (subcarrierOffset) << " at Subframe " << (10 * (m_frameNo - 1) + (m_subframeNo - 1)) << std::endl);
+                  // --- Flujo legacy (SARA OFF o no se detectó colisión) ---
+                  // En el código original se construía un "rar_dci" local quedando huérfano.
+                  // Lo correcto (y consistente con el flujo de no-colisión) es encolar UN RAR en m_rarQueue.
                   NbIotRrcSap::Rar rar;
                   rar.cellRnti = m_cmacSapUser->AllocateTemporaryCellRnti ();
-                  rar.rapId = subcarrierOffset + iter->first;
+                  rar.rapId = rapid;
                   rar.rarPayload.cellRnti = rar.cellRnti;
-                  rar_dci.isRar = true;
-                  rar_dci.isEdt = edt;
-                  rar_dci.rars.push_back (rar);
-                  rar_dci.ranti = m_rapIdRantiMap[subcarrierOffset + iter->first];
+                  rar.ceLevel = ce.coverageEnhancementLevel;
+
+                  // Sin SARA: estos flags se quedan por defecto (false, 1, 0)
+                  // rar.saraGroup = false; rar.saraGroupSize = 1; rar.saraTag = 0;
+
+                  m_rarQueue.push_back (std::make_pair (ranti, rar));
                   m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
-                  m_RntiCeMap.insert (
-                      std::pair<uint32_t,
-                                NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel> (
-                          rar.cellRnti, ce.coverageEnhancementLevel));
+                  m_RntiCeMap.insert (std::make_pair (rar.cellRnti, ce.coverageEnhancementLevel));
                 }
             }
+
         }
       std::vector<NbIotRrcSap::NpdcchMessage> rar_dcis;
       if (m_rarQueue.size () > 0)
@@ -1319,76 +1440,73 @@ LteEnbMac::DoReportMacCeToScheduler (MacCeListElement_s bsr)
 void
 LteEnbMac::DoReceivePhyPdu (Ptr<Packet> p)
 {
-  NS_LOG_FUNCTION (this);
-  LteRadioBearerTag tag;
-  p->RemovePacketTag (tag);
+  NS_LOG_FUNCTION (this);                                                   // (1)
+  LteRadioBearerTag tag;                                                    // (2)
+  p->RemovePacketTag (tag);                                                 // (3)
 
-  // store info of the packet received
+  // forward the packet to the correspondent RLC (Radio Link Control)
+  uint16_t rnti = tag.GetRnti ();                                           // (4)
+  uint8_t  lcid = tag.GetLcid ();                                           // (5)
 
-  //   std::map <uint16_t,UlInfoListElement_s>::iterator it;
-  //   u_int rnti = tag.GetRnti ();
-  //  u_int lcid = tag.GetLcid ();
-  //   it = m_ulInfoListElements.find (tag.GetRnti ());
-  //   if (it == m_ulInfoListElements.end ())
-  //     {
-  //       // new RNTI
-  //       UlInfoListElement_s ulinfonew;
-  //       ulinfonew.m_rnti = tag.GetRnti ();
-  //       // always allocate full size of ulReception vector, initializing all elements to 0
-  //       ulinfonew.m_ulReception.assign (MAX_LC_LIST+1, 0);
-  //       // set the element for the current LCID
-  //       ulinfonew.m_ulReception.at (tag.GetLcid ()) = p->GetSize ();
-  //       ulinfonew.m_receptionStatus = UlInfoListElement_s::Ok;
-  //       ulinfonew.m_tpc = 0; // Tx power control not implemented at this stage
-  //       m_ulInfoListElements.insert (std::pair<uint16_t, UlInfoListElement_s > (tag.GetRnti (), ulinfonew));
-  //
-  //     }
-  //   else
-  //     {
-  //       // existing RNTI: we just set the value for the current
-  //       // LCID. Note that the corresponding element had already been
-  //       // allocated previously.
-  //       NS_ASSERT_MSG ((*it).second.m_ulReception.at (tag.GetLcid ()) == 0, "would overwrite previously written ulReception element");
-  //       (*it).second.m_ulReception.at (tag.GetLcid ()) = p->GetSize ();
-  //       (*it).second.m_receptionStatus = UlInfoListElement_s::Ok;
-  //     }
+  DataVolumeAndPowerHeadroomTag dprTag;                                     // (6)
+  BufferStatusReportTag          bsrTag;                                    // (7)
+  uint32_t buffersize;                                                     // (8)
 
-  // forward the packet to the correspondent RLC
-  uint16_t rnti = tag.GetRnti ();
-  uint8_t lcid = tag.GetLcid ();
+  if (p->RemovePacketTag (dprTag))                                          // (9)
+    { // it's MSG3 (RA Msg3 con DV (Data Volume) en el DPR)
+      buffersize = DataVolumeDPR::DVId2BufferSize (dprTag.GetDataVolumeValue ()); // (10)
+      m_ueStoredBSR[rnti] = buffersize;                                     // (11)
 
-  DataVolumeAndPowerHeadroomTag dprTag;
-  BufferStatusReportTag bsrTag;
-  uint32_t buffersize;
-  if(p->RemovePacketTag(dprTag)){ // it's MSG3
-    buffersize = DataVolumeDPR::DVId2BufferSize(dprTag.GetDataVolumeValue());
-    m_ueStoredBSR[rnti] = buffersize;
+      NS_LOG_INFO ("[ENB][MSG3][RX] rnti=" << rnti                          // (12)
+                   << " lcid="      << (uint32_t) lcid
+                   << " bufferSize=" << buffersize
+                   << " pktUid="    << p->GetUid ());
 
-  }else if (p->RemovePacketTag(bsrTag)){
-  buffersize = BufferSizeLevelBsr::BsrId2BufferSize(bsrTag.GetBufferStatusReportIndex());
-  buffersize += 4; // Compensate RLC Header etc
-  //NS_BUILD_DEBUG(std::cout << "-------------------------" << std::endl);
-  //NS_BUILD_DEBUG(std::cout << "Buffersize: " << buffersize << std::endl);
-  //NS_BUILD_DEBUG(std::cout << "-------------------------" << std::endl);
-  m_schedulerNb->ScheduleUlRlcBufferReq(rnti,buffersize);
-  
-  }
-  std::map<uint16_t, std::map<uint8_t, LteMacSapUser *>>::iterator rntiIt =
-      m_rlcAttached.find (rnti);
-  NS_ASSERT_MSG (rntiIt != m_rlcAttached.end (), "could not find RNTI" << rnti);
-  std::map<uint8_t, LteMacSapUser *>::iterator lcidIt = rntiIt->second.find (lcid);
-  //NS_ASSERT_MSG (lcidIt != rntiIt->second.end (), "could not find LCID" << lcid);
+      // ===== NUEVO: leer Tag SARA UL (cd, dmrs) si existe =====
+      SaraUlIdTag saraTag;                                                  // (13)
+      if (p->PeekPacketTag (saraTag))                                       // (14)
+        {
+          uint8_t cd;                                                       // (15)
+          uint8_t dmrs;                                                     // (16)
+          saraTag.Get (cd, dmrs);                                           // (17)
 
-  LteMacSapUser::ReceivePduParameters rxPduParams;
-  rxPduParams.p = p;
-  rxPduParams.rnti = rnti;
-  rxPduParams.lcid = lcid;
-
-
-  //Receive PDU only if LCID is found
-  if (lcidIt != rntiIt->second.end ())
+          NS_LOG_INFO ("[ENB][MSG3][TAG-SARA] rnti=" << rnti                // (18)
+                       << " lcid=" << (uint32_t) lcid
+                       << " cd="   << (uint32_t) cd
+                       << " dmrs=" << (uint32_t) dmrs);
+        }
+      else                                                                  // (19)
+        {
+          NS_LOG_INFO ("[ENB][MSG3][NO-SARA-TAG] rnti=" << rnti             // (20)
+                       << " lcid=" << (uint32_t) lcid);
+        }
+      // ===== FIN BLOQUE NUEVO =====
+    }
+  else if (p->RemovePacketTag (bsrTag))                                     // (21)
     {
-      (*lcidIt).second->ReceivePdu (rxPduParams);
+      buffersize = BufferSizeLevelBsr::BsrId2BufferSize (bsrTag.GetBufferStatusReportIndex ()); // (22)
+      buffersize += 4; // Compensate RLC (Radio Link Control) Header etc   // (23)
+
+      m_schedulerNb->ScheduleUlRlcBufferReq (rnti, buffersize);             // (24)
+    }
+
+  std::map<uint16_t, std::map<uint8_t, LteMacSapUser *>>::iterator rntiIt = // (25)
+    m_rlcAttached.find (rnti);
+  NS_ASSERT_MSG (rntiIt != m_rlcAttached.end (), "could not find RNTI" << rnti); // (26)
+
+  std::map<uint8_t, LteMacSapUser *>::iterator lcidIt =                    // (27)
+    rntiIt->second.find (lcid);
+  //NS_ASSERT_MSG (lcidIt != rntiIt->second.end (), "could not find LCID" << lcid); // (28)
+
+  LteMacSapUser::ReceivePduParameters rxPduParams;                          // (29)
+  rxPduParams.p    = p;                                                     // (30)
+  rxPduParams.rnti = rnti;                                                  // (31)
+  rxPduParams.lcid = lcid;                                                  // (32)
+
+  // Receive PDU only if LCID (Logical Channel ID) is found
+  if (lcidIt != rntiIt->second.end ())                                      // (33)
+    {
+      (*lcidIt).second->ReceivePdu (rxPduParams);                           // (34)
     }
 }
 

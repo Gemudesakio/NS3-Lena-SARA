@@ -493,7 +493,7 @@ UlDciN0NbiotControlMessage::GetLc(void)
   return m_lc;
 }
 // ----------------------------------------------------------------------------------------------------------
-
+//se agregaron atributos con valores por defecto para SARA
 
 RarNbiotControlMessage::RarNbiotControlMessage (void)
 {

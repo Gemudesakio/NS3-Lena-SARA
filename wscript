@@ -7,6 +7,7 @@ def build(bld):
         lte_module_dependencies.append('fd-net-device')
     module = bld.create_ns3_module('lte', lte_module_dependencies)
     module.source = [
+        'model/sara-ul-id-tag.cc',
         'model/lte-common.cc',
         'model/lte-spectrum-phy.cc',
         'model/lte-spectrum-signal-parameters.cc',
@@ -213,6 +214,7 @@ def build(bld):
     headers = bld(features='ns3header')
     headers.module = 'lte'
     headers.source = [
+        'model/sara-ul-id-tag.h',
         'model/lte-common.h',
         'model/lte-spectrum-phy.h',
         'model/lte-spectrum-signal-parameters.h',

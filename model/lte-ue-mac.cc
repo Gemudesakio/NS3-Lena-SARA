@@ -40,6 +40,8 @@
 #include <ns3/simulator.h>
 #include <ns3/lte-common.h>
 #include <fstream>
+#include "sara-ul-id-tag.h"    // (1) Tag con cd y dmrs para Msg3
+
 
 namespace ns3 {
 
@@ -280,6 +282,12 @@ UeMemberLteUePhySapUser::NotifyAboutHarqOpportunity (
 //////////////////////////////////////////////////////////
 // LteUeMac methods
 ///////////////////////////////////////////////////////////
+void
+LteUeMac::SetImsi (uint64_t imsi)
+{
+  // (1) Asigna el IMSI al miembro interno
+  m_imsi = imsi;
+}
 
 TypeId
 LteUeMac::GetTypeId (void)
@@ -404,38 +412,76 @@ LteUeMac::GetBufferSizeComplete(){
 void
 LteUeMac::DoTransmitPdu (LteMacSapProvider::TransmitPduParameters params)
 {
-  NS_LOG_FUNCTION (this);
+  NS_LOG_FUNCTION (this);                                                    
   NS_ASSERT_MSG (m_rnti == params.rnti, "RNTI mismatch between RLC and MAC");
-  LteRadioBearerTag radioTag (params.rnti, params.lcid, 0 /* UE works in SISO mode*/);
-  DataVolumeAndPowerHeadroomTag dprTag;
-  BufferStatusReportTag bsrTag;
-  uint64_t bsr =0;
-  //DoSetTransmissionScheduled(false);
-  if(m_msg5Buffer > 0){
-    // We are just about to send MSG3, add DPR Element for MSG5 (potentially CIoT-Opt)
-    //std::cout << " set payload" << std::endl;
-    uint8_t dataVolumeIndex = DataVolumeDPR::BufferSize2DVId(m_msg5Buffer);
-    m_msg5Buffer = 0;
-    m_nextIsMsg5 = true;
-    dprTag.SetDataVolumeValue(dataVolumeIndex);
-    params.pdu->AddPacketTag(dprTag);
-  }
-  else{
 
-    bsr = GetBufferSizeComplete();
-    if(bsr > 0){
+  LteRadioBearerTag radioTag (params.rnti, params.lcid,                      
+                              0 /* UE works in SISO mode*/);
+  DataVolumeAndPowerHeadroomTag dprTag;                                      
+  BufferStatusReportTag bsrTag;                                              
+  uint64_t bsr = 0;                                                          
+  //DoSetTransmissionScheduled(false);                                       
 
-      bsrTag.SetBufferStatusReportIndex(BufferSizeLevelBsr::BufferSize2BsrId (bsr));
-      params.pdu->AddPacketTag(bsrTag);
+  if (m_msg5Buffer > 0)                                                      
+    {
+      // We are just about to send MSG3, add DPR Element for MSG5            
+      // (potentially CIoT-Opt)                                             
+
+      uint8_t dataVolumeIndex =                                             
+        DataVolumeDPR::BufferSize2DVId (m_msg5Buffer);                      
+
+      m_msg5Buffer = 0;                                                     
+      m_nextIsMsg5 = true;                                                 
+
+      dprTag.SetDataVolumeValue (dataVolumeIndex);                          
+      params.pdu->AddPacketTag (dprTag);                                    
+
+      // ===== NUEVO: TAG UL SARA (cd, dmrs) =====
+      if (m_saraGroupActive)                                               
+        {
+          Ptr<UniformRandomVariable> rng =                                  
+            CreateObject<UniformRandomVariable> ();                         
+
+          uint8_t cd   = rng->GetInteger (1, 6);                            
+          uint8_t dmrs = rng->GetInteger (1, 6);                            
+
+          SaraUlIdTag stag;                                                 
+          stag.Set (cd, dmrs);                                              
+          params.pdu->AddPacketTag (stag);                                  
+
+          NS_LOG_INFO ("[UE][MSG3][TAG-SARA] rnti="                         
+                       << (uint32_t) params.rnti
+                       << " lcid="  << (uint32_t) params.lcid
+                       << " cd="    << (uint32_t) cd
+                       << " dmrs="  << (uint32_t) dmrs);
+        }
+      else                                                                  
+        {
+          NS_LOG_INFO ("[UE][MSG3][NO-SARA] rnti="                          
+                       << (uint32_t) params.rnti
+                       << " lcid=" << (uint32_t) params.lcid
+                       << " (sin cd/dmrs)");
+        }
+      // ===== FIN NUEVO BLOQUE SARA =====
     }
-    // Normal PDU just add BSR for next Packet
-  }
-  
-  params.pdu->AddPacketTag (radioTag);
-  // store pdu in HARQ buffer
-  //m_miUlHarqProcessesPacket.at (m_harqProcessId)->AddPacket (params.pdu);
-  //m_miUlHarqProcessesPacketTimer.at (m_harqProcessId) = HARQ_PERIOD;
-  m_uePhySapProvider->SendMacPdu (params.pdu);
+  else                                                                       
+    {
+      bsr = GetBufferSizeComplete ();                                       
+      if (bsr > 0)                                                          
+        {
+          bsrTag.SetBufferStatusReportIndex (                               
+            BufferSizeLevelBsr::BufferSize2BsrId (bsr));                    
+          params.pdu->AddPacketTag (bsrTag);                                
+        }
+      // Normal PDU just add BSR for next Packet                            
+    }
+
+  params.pdu->AddPacketTag (radioTag);                                      
+  // store pdu in HARQ buffer                                               
+  //m_miUlHarqProcessesPacket.at (m_harqProcessId)->AddPacket (params.pdu); 
+  //m_miUlHarqProcessesPacketTimer.at (m_harqProcessId) = HARQ_PERIOD;      
+
+  m_uePhySapProvider->SendMacPdu (params.pdu);                               
 }
 
 void
@@ -1348,31 +1394,92 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
             }
         }
     }
-  else if (msg->GetMessageType () == LteControlMessage::RAR_NB)
+ else if (msg->GetMessageType () == LteControlMessage::RAR_NB)                                
+{
+  if (m_waitingForRaResponse)                                                                
+  {
+    Ptr<RarNbiotControlMessage> rarMsg = DynamicCast<RarNbiotControlMessage> (msg);           
+    uint16_t raRnti = rarMsg->GetRaRnti ();                                                   
+
+    NS_LOG_LOGIC (this << "got RAR with RA-RNTI " << (uint32_t) raRnti
+                       << ", expecting " << (uint32_t) m_raRnti);                             
+
+    if (raRnti == m_raRnti)                                                                   
     {
-      if (m_waitingForRaResponse)
+      uint8_t myRapid = NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel)            
+                      + m_raPreambleId;                                                       
+      bool saraFound = false;                                                                 
+      bool processed = false;                                                               
+
+      // (A) Escanea toda la lista de RARs recibidos
+      for (auto it = rarMsg->RarListBegin (); it != rarMsg->RarListEnd (); ++it)              
+      {
+        NS_LOG_INFO ("[UE][RAR][RX] RA-RNTI=" << (uint32_t) raRnti                            
+                     << " RAPID="   << (uint32_t) it->rapId
+                     << " T-CRNTI=" << it->cellRnti
+                     << " SARA[group=" << (it->saraGroup ? "1":"0")
+                     << ", size="   << (uint32_t) it->saraGroupSize
+                     << ", tag="    << (uint32_t) it->saraTag << "]");
+
+        if (it->rapId != myRapid)                                                            
         {
-          Ptr<RarNbiotControlMessage> rarMsg = DynamicCast<RarNbiotControlMessage> (msg);
-          uint16_t raRnti = rarMsg->GetRaRnti ();
-          NS_LOG_LOGIC (this << "got RAR with RA-RNTI " << (uint32_t) raRnti << ", expecting "
-                             << (uint32_t) m_raRnti);
-          if (raRnti == m_raRnti) // RAR corresponds to TX subframe of preamble
-            {
-              for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
-                   it != rarMsg->RarListEnd (); ++it)
-                {
-                  if (it->rapId == NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) +
-                                       m_raPreambleId) // RAR is for me
-                    {
-                      RecvRaResponseNb (it->rarPayload);
-                      /// \todo RRC generates the RecvRaResponse messaged
-                      /// for avoiding holes in transmission at PHY layer
-                      /// (which produce erroneous UL CQI evaluation)
-                    }
-                }
-            }
+          continue;
         }
-    }
+
+        if (it->saraGroup)                                                                
+        {
+          saraFound = true;                                                                   
+
+          if (it->saraGroupSize > 0)                                                          
+          {
+            // Cálculo determinístico del tag usando IMSI 
+            uint64_t seed = (m_imsi != 0) ? m_imsi : reinterpret_cast<uintptr_t>(this);       
+            uint8_t desiredTag = static_cast<uint8_t>(seed % it->saraGroupSize);              
+
+            NS_LOG_INFO ("[UE][RAR][CHOICE-SARA] IMSI/seed=" << seed
+                         << " groupSize=" << (uint32_t) it->saraGroupSize
+                         << " → desiredTag=" << (uint32_t) desiredTag);
+
+            if (it->saraTag == desiredTag)                                                    
+            {
+              m_saraGroupActive = true;                                                       
+              m_saraGroupSize   = it->saraGroupSize;                                          
+              m_saraTag         = it->saraTag;                                                
+
+              NS_LOG_INFO ("[UE][RAR][SARA][SELECT] RAPID=" << (uint32_t) myRapid
+                           << " group=" << (uint32_t) m_saraGroupSize
+                           << " tag="   << (uint32_t) m_saraTag);
+
+              RecvRaResponseNb (it->rarPayload);                                              
+              processed = true;                                                               
+              break;                                                                          
+            }
+          }
+        }
+      } // fin for
+
+      // (C) Si no se procesó ningún RAR SARA, usar la ruta por defecto (primer RAR con mi RAPID)
+      if (!processed)                                                                         
+      {
+        for (auto it = rarMsg->RarListBegin (); it != rarMsg->RarListEnd (); ++it)            
+        {
+          if (it->rapId == myRapid)                                                           
+          {
+            m_saraGroupActive = false;                                                        
+            m_saraGroupSize   = 1;                                                            
+            m_saraTag         = 0;                                                            
+
+            NS_LOG_INFO ("[UE][RAR][DEFAULT] elegido RAPID=" << (uint32_t) myRapid);          
+            RecvRaResponseNb (it->rarPayload);                                                
+            break;                                                                            
+          }
+        }
+      }
+    } // if raRnti == m_raRnti
+  }   // if m_waitingForRaResponse
+}     // else if RAR_NB
+
+
   else if (msg->GetMessageType () == LteControlMessage::DL_DCI_NB){
       Ptr<DlDciN1NbiotControlMessage> msg2 = DynamicCast<DlDciN1NbiotControlMessage> (msg);
       NbIotRrcSap::DciN1 dci = msg2->GetDci ();
