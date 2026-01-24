@@ -1408,8 +1408,9 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
     {
       uint8_t myRapid = NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel)            
                       + m_raPreambleId;                                                       
-      bool saraFound = false;                                                                 
       bool processed = false;                                                               
+      bool desiredTagSet = false;                                                           
+      uint8_t desiredTag = 0;                                                               
 
       // (A) Escanea toda la lista de RARs recibidos
       for (auto it = rarMsg->RarListBegin (); it != rarMsg->RarListEnd (); ++it)              
@@ -1428,21 +1429,21 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
 
         if (it->saraGroup)                                                                
         {
-          saraFound = true;                                                                   
-
           if (it->saraGroupSize > 0)                                                          
           {
-            // Cálculo determinístico del tag usando IMSI 
-            uint64_t seed = (m_imsi != 0) ? m_imsi : reinterpret_cast<uintptr_t>(this);       
-            uint8_t desiredTag = static_cast<uint8_t>(seed % it->saraGroupSize);              
+            if (!desiredTagSet)
+              {
+                Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+                desiredTag = rng->GetInteger (0, it->saraGroupSize - 1);
+                desiredTagSet = true;
 
-            NS_LOG_INFO ("[UE][RAR][CHOICE-SARA] IMSI/seed=" << seed
-                         << " groupSize=" << (uint32_t) it->saraGroupSize
-                         << " → desiredTag=" << (uint32_t) desiredTag);
+                NS_LOG_INFO ("[UE][RAR][CHOICE-SARA] rng tag=" << (uint32_t) desiredTag
+                             << " groupSize=" << (uint32_t) it->saraGroupSize);
+              }
 
             if (it->saraTag == desiredTag)                                                    
             {
-              m_saraGroupActive = true;                                                       
+              m_saraGroupActive = it->saraGroup;                                                       
               m_saraGroupSize   = it->saraGroupSize;                                          
               m_saraTag         = it->saraTag;                                                
 
