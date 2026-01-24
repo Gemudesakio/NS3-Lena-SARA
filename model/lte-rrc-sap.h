@@ -701,7 +701,17 @@ public:
   /// RrcConnectionSetup structure
   struct RrcConnectionSetup
   {
+    RrcConnectionSetup ()
+      : rrcTransactionIdentifier (0),
+        ueIdentity (0),
+        assignedRnti (0),
+        radioResourceConfigDedicated ()
+    {
+    }
+
     uint8_t rrcTransactionIdentifier; ///< RRC transaction identifier
+    uint64_t ueIdentity; ///< UE identity (IMSI)
+    uint16_t assignedRnti; ///< definitive RNTI assigned by eNB
     RadioResourceConfigDedicated radioResourceConfigDedicated; ///< radio resource config dedicated
   };
 
@@ -2049,7 +2059,6 @@ void MemberLteEnbRrcSapProvider<C>::RecvIdealUeContextRemoveRequest (uint16_t rn
 
 
 #endif // LTE_RRC_SAP_H
-
 
 
 

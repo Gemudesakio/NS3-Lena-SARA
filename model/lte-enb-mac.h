@@ -42,6 +42,7 @@
 #include <ns3/packet.h>
 #include <ns3/packet-burst.h>
 #include <ns3/lte-ccm-mac-sap.h>
+#include <ns3/event-id.h>
 #include "nb-iot-rrc-sap.h"
 #include "nb-iot-scheduler.h"
 #include "ns3/random-variable-stream.h"   // << NECESARIO para UniformRandomVariable
@@ -531,10 +532,32 @@ private:
   void DoRemoveUeFromScheduler(uint16_t rnti);
   
   void DoSetLogDir(std::string logdir);
-  
+
+  struct Msg3BufferEntry
+  {
+    Ptr<Packet> p;
+    uint8_t lcid;
+    uint8_t codebook;
+  };
+
+  struct Msg3Buffer
+  {
+    std::vector<Msg3BufferEntry> entries;
+    EventId resolveEvent;
+  };
+
+  void ResolveMsg3Window (uint16_t rnti, uint64_t windowEnd);
+  bool ForwardMsg3ToRlc (Ptr<Packet> p, uint16_t rnti, uint8_t lcid);
+
 
   NbiotScheduler* m_schedulerNb = nullptr;
   std::map<uint16_t, uint32_t> m_rapIdRantiMap; ///< RAPID RNTI map
+  std::map<uint16_t, uint8_t> m_rntiToRapId; ///< T-CRNTI -> RAPID map (para SARA)
+  std::map<uint16_t, std::map<uint8_t, bool>> m_saraUlTags; ///< RNTI -> codebook usado (dmrs ignorado)
+  std::map<uint16_t, uint64_t> m_rntiMsg3WindowEnd; ///< RNTI -> última subtrama del grant Msg3
+  std::map<std::pair<uint16_t, uint64_t>, Msg3Buffer> m_msg3Buffers; ///< Buffer Msg3 por (RNTI, ventana)
+  uint32_t m_msg3RxCount; ///< total Msg3 recibidos en el eNB (para resumen)
+  uint32_t m_msg3AcceptedCount; ///< total Msg3 aceptados/enviados a RLC
   std::map<uint32_t, NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel> m_RntiCeMap;
   std::map<uint16_t, bool> m_rapIdCollisionMap; // Used when contention resolution is involved
   std::map<uint8_t, std::map<uint8_t, uint32_t>> m_receivedNprachPreambleCount;

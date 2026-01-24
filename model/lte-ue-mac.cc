@@ -619,7 +619,7 @@ LteUeMac::SendRaPreamble (bool contention)
   NS_ASSERT (m_subframeNo > 0); // sanity check for subframe starting at 1
   m_raRnti = m_subframeNo - 1;
   m_uePhySapProvider->SendRachPreamble (m_raPreambleId, m_raRnti);
-  NS_LOG_INFO (this << " sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
+  NS_LOG_INFO (this << " [UE][MSG1] sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
                     << (uint32_t) m_raRnti);
   // 3GPP 36.321 5.1.4
   //Time raWindowBegin = MilliSeconds (3);
@@ -655,7 +655,7 @@ LteUeMac::SendRaPreambleNb (bool contention)
   Simulator::Schedule (MilliSeconds (time), &LteUePhySapProvider::SendNprachPreamble,
                        m_uePhySapProvider, m_raPreambleId, m_raRnti,
                        NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel));
-  NS_LOG_INFO (this << " sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
+  NS_LOG_INFO (this << " [UE][MSG1] sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
                     << (uint32_t) m_raRnti);
 
   if (m_mac_logging)

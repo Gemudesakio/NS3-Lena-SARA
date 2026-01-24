@@ -50,7 +50,7 @@
 
 #include <algorithm>
 #include <fstream>
-#include "sara-ul-id-tag.h"    // (1) Tag con cd y dmrs para Msg3
+#include "sara-ul-id-tag.h"    // (1) Tag con cd para Msg3 (dmrs ignorado)
 
 namespace ns3 {
 
@@ -469,6 +469,8 @@ LteEnbMac::LteEnbMac () : m_ccmMacSapUser (0)
   m_saraTpr           = 0.975;
   m_saraFpr           = 0.001;
   m_saraMaxGroupSize  = 2;
+  m_msg3RxCount = 0;
+  m_msg3AcceptedCount = 0;
 
   if (m_saraRng == 0)
     {
@@ -488,6 +490,8 @@ void
 LteEnbMac::DoDispose (void)
 {
   NS_LOG_FUNCTION (this);
+  NS_LOG_INFO ("[ENB][SUMMARY] MSG3 recibidos = " << m_msg3RxCount);
+  NS_LOG_INFO ("[ENB][SUMMARY] MSG3 enviados = " << m_msg3AcceptedCount);
  //limpia vartiables de estado
   m_dlCqiReceived.clear ();
   m_ulCqiReceived.clear ();
@@ -841,7 +845,9 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
               NbIotRrcSap::Rar rar;
               rar.cellRnti = m_cmacSapUser->AllocateTemporaryCellRnti ();
               rar.rapId = subcarrierOffset + iter->first;
+              rar.ceLevel = ce.coverageEnhancementLevel; //correccion ce level
               rar.rarPayload.cellRnti = rar.cellRnti;
+              m_rntiToRapId[rar.cellRnti] = rar.rapId;
 
               if (m_mac_logging)
               {
@@ -901,7 +907,7 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
                   const uint8_t groupSize = std::min<uint8_t> (m_saraMaxGroupSize, 2);
 
                    // LOG 1: anuncio de generación de RAR(es) de grupo
-                  NS_LOG_INFO ("eNB SARA: generar " << int(groupSize)
+                  NS_LOG_INFO ("[ENB][MSG2][SARA] generar " << int(groupSize)
                               << " RAR para RAPID=" << int(rapid)
                               << " RA-RNTI=" << ranti);
 
@@ -912,6 +918,7 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
                       rar.rapId = rapid;
                       rar.rarPayload.cellRnti = rar.cellRnti;
                       rar.ceLevel = ce.coverageEnhancementLevel;
+                      m_rntiToRapId[rar.cellRnti] = rar.rapId;
 
                       // --- Campos SARA en el RAR ---
                       rar.saraGroup     = true;
@@ -922,7 +929,7 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
                       m_rarQueue.push_back (std::make_pair (ranti, rar));
 
                        // LOG 2: confirmación de cada RAR encolado
-                      NS_LOG_INFO ("eNB RAR encolado: RAPID=" << int(rar.rapId)
+                      NS_LOG_INFO ("[ENB][MSG2] RAR encolado: RAPID=" << int(rar.rapId)
                                   << " TCRNTI=" << rar.cellRnti
                                   << " SARA[group=1, size=" << int(groupSize)
                                   << ", tag=" << int(n) << "]");
@@ -944,6 +951,7 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
                   rar.rapId = rapid;
                   rar.rarPayload.cellRnti = rar.cellRnti;
                   rar.ceLevel = ce.coverageEnhancementLevel;
+                  m_rntiToRapId[rar.cellRnti] = rar.rapId;
 
                   // Sin SARA: estos flags se quedan por defecto (false, 1, 0)
                   // rar.saraGroup = false; rar.saraGroupSize = 1; rar.saraTag = 0;
@@ -1115,6 +1123,11 @@ LteEnbMac::DoSubframeIndicationNb (uint32_t frameNo, uint32_t subframeNo)
           for (std::vector<NbIotRrcSap::Rar>::iterator rar = it->rars.begin ();
                rar != it->rars.end (); ++rar)
             {
+              if (!rar->rarPayload.ulGrant.subframes.second.empty ())
+                {
+                  m_rntiMsg3WindowEnd[rar->cellRnti] =
+                    rar->rarPayload.ulGrant.subframes.second.back ();
+                }
               msg->AddRar (*rar);
             }
           msg->SetRaRnti (it->ranti);
@@ -1437,6 +1450,73 @@ LteEnbMac::DoReportMacCeToScheduler (MacCeListElement_s bsr)
   NS_LOG_DEBUG (this << " bsr Size after push_back " << (uint16_t) m_ulCeReceived.size ());
 }
 
+bool
+LteEnbMac::ForwardMsg3ToRlc (Ptr<Packet> p, uint16_t rnti, uint8_t lcid)
+{
+  std::map<uint16_t, std::map<uint8_t, LteMacSapUser *>>::iterator rntiIt =
+    m_rlcAttached.find (rnti);
+  NS_ASSERT_MSG (rntiIt != m_rlcAttached.end (), "could not find RNTI" << rnti);
+
+  std::map<uint8_t, LteMacSapUser *>::iterator lcidIt =
+    rntiIt->second.find (lcid);
+
+  LteMacSapUser::ReceivePduParameters rxPduParams;
+  rxPduParams.p    = p;
+  rxPduParams.rnti = rnti;
+  rxPduParams.lcid = lcid;
+
+  if (lcidIt != rntiIt->second.end ())
+    {
+      (*lcidIt).second->ReceivePdu (rxPduParams);
+      return true;
+    }
+  return false;
+}
+
+void
+LteEnbMac::ResolveMsg3Window (uint16_t rnti, uint64_t windowEnd)
+{
+  const std::pair<uint16_t, uint64_t> key = std::make_pair (rnti, windowEnd);
+  std::map<std::pair<uint16_t, uint64_t>, Msg3Buffer>::iterator it =
+    m_msg3Buffers.find (key);
+  if (it == m_msg3Buffers.end ())
+    {
+      return;
+    }
+
+  std::map<uint8_t, uint32_t> counts;
+  for (std::vector<Msg3BufferEntry>::const_iterator e = it->second.entries.begin ();
+       e != it->second.entries.end (); ++e)
+    {
+      counts[e->codebook] += 1;
+    }
+
+  for (std::vector<Msg3BufferEntry>::const_iterator e = it->second.entries.begin ();
+       e != it->second.entries.end (); ++e)
+    {
+      if (counts[e->codebook] > 1)
+        {
+          NS_LOG_INFO ("[ENB][MSG3][SARA-COLLISION] rnti="
+                       << rnti
+                       << " cd=" << (uint32_t) e->codebook
+                       << " count=" << counts[e->codebook]);
+          continue;
+        }
+
+      NS_LOG_INFO ("[ENB][MSG3][SARA-SEPARATED] rnti="
+                   << rnti
+                   << " cd=" << (uint32_t) e->codebook
+                   << " accepted");
+      if (ForwardMsg3ToRlc (e->p, rnti, e->lcid))
+        {
+          ++m_msg3AcceptedCount;
+        }
+    }
+
+  m_msg3Buffers.erase (it);
+  m_rntiMsg3WindowEnd.erase (rnti);
+}
+
 void
 LteEnbMac::DoReceivePhyPdu (Ptr<Packet> p)
 {
@@ -1456,31 +1536,73 @@ LteEnbMac::DoReceivePhyPdu (Ptr<Packet> p)
     { // it's MSG3 (RA Msg3 con DV (Data Volume) en el DPR)
       buffersize = DataVolumeDPR::DVId2BufferSize (dprTag.GetDataVolumeValue ()); // (10)
       m_ueStoredBSR[rnti] = buffersize;                                     // (11)
+      ++m_msg3RxCount;
+      bool countMsg3Accepted = false;
 
       NS_LOG_INFO ("[ENB][MSG3][RX] rnti=" << rnti                          // (12)
                    << " lcid="      << (uint32_t) lcid
                    << " bufferSize=" << buffersize
                    << " pktUid="    << p->GetUid ());
 
-      // ===== NUEVO: leer Tag SARA UL (cd, dmrs) si existe =====
+      // ===== NUEVO: leer Tag SARA UL (solo codebook) si existe =====
       SaraUlIdTag saraTag;                                                  // (13)
       if (p->PeekPacketTag (saraTag))                                       // (14)
         {
           uint8_t cd;                                                       // (15)
           uint8_t dmrs;                                                     // (16)
           saraTag.Get (cd, dmrs);                                           // (17)
+          (void) dmrs;
 
           NS_LOG_INFO ("[ENB][MSG3][TAG-SARA] rnti=" << rnti                // (18)
                        << " lcid=" << (uint32_t) lcid
-                       << " cd="   << (uint32_t) cd
-                       << " dmrs=" << (uint32_t) dmrs);
+                       << " cd="   << (uint32_t) cd);
+
+          uint64_t nowSubframe = static_cast<uint64_t> (Simulator::Now ().GetMilliSeconds ());
+          uint64_t windowEnd = nowSubframe;
+          std::map<uint16_t, uint64_t>::iterator wIt = m_rntiMsg3WindowEnd.find (rnti);
+          if (wIt != m_rntiMsg3WindowEnd.end ())
+            {
+              windowEnd = wIt->second;
+            }
+
+          std::pair<uint16_t, uint64_t> key = std::make_pair (rnti, windowEnd);
+          Msg3Buffer &buf = m_msg3Buffers[key];
+          Msg3BufferEntry entry;
+          entry.p = p;
+          entry.lcid = lcid;
+          entry.codebook = cd;
+          buf.entries.push_back (entry);
+
+          if (!buf.resolveEvent.IsRunning ())
+            {
+              uint64_t resolveSubframe = windowEnd;
+              if (resolveSubframe < nowSubframe)
+                {
+                  resolveSubframe = nowSubframe;
+                }
+              Time delay = MilliSeconds (resolveSubframe - nowSubframe + 1);
+              buf.resolveEvent =
+                Simulator::Schedule (delay, &LteEnbMac::ResolveMsg3Window, this, rnti, windowEnd);
+            }
+
+          return; // se resolverá en bloque al final de la ventana
         }
       else                                                                  // (19)
         {
           NS_LOG_INFO ("[ENB][MSG3][NO-SARA-TAG] rnti=" << rnti             // (20)
                        << " lcid=" << (uint32_t) lcid);
+          countMsg3Accepted = true;
         }
       // ===== FIN BLOQUE NUEVO =====
+      if (countMsg3Accepted)
+        {
+          if (ForwardMsg3ToRlc (p, rnti, lcid))
+            {
+              ++m_msg3AcceptedCount;
+            }
+          return;
+        }
+
     }
   else if (p->RemovePacketTag (bsrTag))                                     // (21)
     {
@@ -1490,24 +1612,7 @@ LteEnbMac::DoReceivePhyPdu (Ptr<Packet> p)
       m_schedulerNb->ScheduleUlRlcBufferReq (rnti, buffersize);             // (24)
     }
 
-  std::map<uint16_t, std::map<uint8_t, LteMacSapUser *>>::iterator rntiIt = // (25)
-    m_rlcAttached.find (rnti);
-  NS_ASSERT_MSG (rntiIt != m_rlcAttached.end (), "could not find RNTI" << rnti); // (26)
-
-  std::map<uint8_t, LteMacSapUser *>::iterator lcidIt =                    // (27)
-    rntiIt->second.find (lcid);
-  //NS_ASSERT_MSG (lcidIt != rntiIt->second.end (), "could not find LCID" << lcid); // (28)
-
-  LteMacSapUser::ReceivePduParameters rxPduParams;                          // (29)
-  rxPduParams.p    = p;                                                     // (30)
-  rxPduParams.rnti = rnti;                                                  // (31)
-  rxPduParams.lcid = lcid;                                                  // (32)
-
-  // Receive PDU only if LCID (Logical Channel ID) is found
-  if (lcidIt != rntiIt->second.end ())                                      // (33)
-    {
-      (*lcidIt).second->ReceivePdu (rxPduParams);                           // (34)
-    }
+  ForwardMsg3ToRlc (p, rnti, lcid);
 }
 
 // ////////////////////////////////////////////

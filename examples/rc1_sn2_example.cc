@@ -19,9 +19,9 @@ static void DoAttach (Ptr<LteHelper> lte, Ptr<NetDevice> ue, Ptr<NetDevice> enb)
 int main (int argc, char *argv[])
 {
   // ---------- Parámetros ----------
-  uint32_t numUe      = 10;     // muchos UEs para provocar colisión
+  uint32_t numUe      = 70;     // muchos UEs para provocar colisión
   double   cellRadius = 200.0;
-  uint32_t stopMs     = 2000;   // parar pronto: ver RAR y cortar antes de líos de Msg3
+  uint32_t stopMs     = 6000;   // parar pronto: ver RAR y cortar antes de líos de Msg3
   bool     useNbSuspend = false; // usa AttachSuspendedNb (también sirve Attach normal)
 
   // ---------- Reproducibilidad ----------
