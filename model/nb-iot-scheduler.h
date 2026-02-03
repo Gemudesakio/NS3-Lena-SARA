@@ -101,6 +101,7 @@ void SetRntiRsrpMap(std::map<uint16_t, double> map);
 void ScheduleUlRlcBufferReq(uint64_t rnti, uint64_t dataSize); // Data in Byte
 void ScheduleDlRlcBufferReq(uint64_t rnti, std::map<uint8_t, LteMacSapProvider::ReportBufferStatusParameters> lcids); // Data in Byte
 void AddToUlBufferReq(uint64_t rnti, uint64_t dataSize);
+void CloneUeConfig(uint16_t srcRnti, uint16_t dstRnti);
 
 void SortBasedOnSelectedSchedulingAlgorithm(SearchSpaceConfig ssc);
 std::vector<uint64_t> GetNextAvailableSearchSpaceCandidate(uint32_t rnti, uint64_t SearchSpaceStartFrame, uint64_t SearchSpaceStartSubframe, uint64_t R_max, uint64_t R);
@@ -163,4 +164,3 @@ protected:
 }  // namespace ns3
 
 #endif /* FF_MAC_SCHEDULER_H */
-

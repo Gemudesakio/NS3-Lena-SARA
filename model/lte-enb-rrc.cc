@@ -37,6 +37,7 @@
 #include <ns3/object-map.h>
 #include <ns3/object-factory.h>
 #include <ns3/simulator.h>
+#include "sara-report.h"
 
 #include <ns3/lte-radio-bearer-info.h>
 #include <ns3/eps-bearer-tag.h>
@@ -1055,6 +1056,23 @@ UeManager::RecvRrcConnectionRequest (LteRrcSap::RrcConnectionRequest msg)
     }
 }
 
+void
+UeManager::StartConnectionSetupForImsi (uint64_t imsi)
+{
+  NS_LOG_FUNCTION (this << imsi);
+  NS_ASSERT_MSG (m_state == INITIAL_RANDOM_ACCESS,
+                 "StartConnectionSetupForImsi in unexpected state " << ToString (m_state));
+
+  m_connectionRequestTimeout.Cancel ();
+  m_imsi = imsi;
+
+  RecordDataRadioBearersToBeStarted ();
+  m_connectionSetupTimeout = Simulator::Schedule (
+      m_rrc->m_connectionSetupTimeoutDuration,
+      &LteEnbRrc::ConnectionSetupTimeout, m_rrc, m_rnti);
+  SwitchToState (CONNECTION_SETUP);
+}
+
 uint64_t
 UeManager::AttachSuspendedNb(uint32_t imsi){
 
@@ -1668,6 +1686,16 @@ UeManager::BuildRrcConnectionReconfiguration ()
     }
 
   return msg;
+}
+
+LteRrcSap::RrcConnectionSetup
+UeManager::BuildRrcConnectionSetup ()
+{
+  NS_LOG_FUNCTION (this);
+  LteRrcSap::RrcConnectionSetup msg2;
+  msg2.rrcTransactionIdentifier = GetNewRrcTransactionIdentifier ();
+  msg2.radioResourceConfigDedicated = BuildRadioResourceConfigDedicated ();
+  return msg2;
 }
 
 LteRrcSap::RadioResourceConfigDedicated
@@ -2832,6 +2860,106 @@ LteEnbRrc::DoRecvRrcConnectionRequest (uint16_t rnti, LteRrcSap::RrcConnectionRe
 }
 
 void
+LteEnbRrc::DoEnqueueConnectionRequest (uint16_t rnti, uint64_t windowEnd, bool isLast, LteRrcSap::RrcConnectionRequest msg)
+{
+  NS_LOG_FUNCTION (this << rnti << windowEnd << isLast);
+  CancelTempRntiRequestTimeout (rnti);
+  const std::pair<uint16_t, uint64_t> key = std::make_pair (rnti, windowEnd);
+  PendingConnReq entry;
+  entry.msg = msg;
+  entry.rxTime = Simulator::Now ();
+  m_contentionGroups[key].entries.push_back (entry);
+
+  if (isLast)
+    {
+      ResolveContentionGroup (rnti, windowEnd);
+    }
+}
+
+void
+LteEnbRrc::ResolveContentionGroup (uint16_t rnti, uint64_t windowEnd)
+{
+  NS_LOG_FUNCTION (this << rnti << windowEnd);
+  const std::pair<uint16_t, uint64_t> key = std::make_pair (rnti, windowEnd);
+  std::map<std::pair<uint16_t, uint64_t>, ContentionGroup>::iterator it =
+    m_contentionGroups.find (key);
+  if (it == m_contentionGroups.end ())
+    {
+      return;
+    }
+
+  bool sentAny = false;
+  for (std::vector<PendingConnReq>::const_iterator e = it->second.entries.begin ();
+       e != it->second.entries.end (); ++e)
+    {
+      if (!m_admitRrcConnectionRequest)
+        {
+          NS_LOG_INFO ("rejecting grouped connection request for temp RNTI " << rnti);
+          continue;
+        }
+
+      const uint64_t imsi = e->msg.ueIdentity;
+      uint16_t assignedRnti = CreateUeManagerForAssignedRnti (rnti, imsi);
+      SendGroupedConnectionSetup (rnti, imsi, assignedRnti);
+      sentAny = true;
+    }
+
+  if (sentAny && HasUeManager (rnti))
+    {
+      Time cleanupDelay = m_connectionRequestTimeoutDuration;
+      Simulator::Schedule (cleanupDelay, &LteEnbRrc::RemoveUe, this, rnti);
+    }
+
+  m_contentionGroups.erase (it);
+}
+
+uint16_t
+LteEnbRrc::CreateUeManagerForAssignedRnti (uint16_t tempRnti, uint64_t imsi)
+{
+  NS_LOG_FUNCTION (this << tempRnti << imsi);
+  uint8_t componentCarrierId = 0;
+  if (HasUeManager (tempRnti))
+    {
+      componentCarrierId = GetUeManagerbyRnti (tempRnti)->GetComponentCarrierId ();
+    }
+
+  uint16_t assignedRnti = AddUe (UeManager::INITIAL_RANDOM_ACCESS, componentCarrierId);
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (assignedRnti);
+  ueManager->StartConnectionSetupForImsi (imsi);
+  return assignedRnti;
+}
+
+void
+LteEnbRrc::SendGroupedConnectionSetup (uint16_t tempRnti, uint64_t imsi, uint16_t assignedRnti)
+{
+  NS_LOG_FUNCTION (this << tempRnti << imsi << assignedRnti);
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (assignedRnti);
+
+  LteRrcSap::RrcConnectionSetup msg = ueManager->BuildRrcConnectionSetup ();
+  msg.ueIdentity = imsi;
+  msg.assignedRnti = assignedRnti;
+
+  // omit duplicate SARA Msg4 log; keep only TX log in protocol layer
+  uint8_t componentCarrierId = ueManager->GetComponentCarrierId ();
+  m_cmacSapProvider.at (componentCarrierId)->MapTempRntiToDefRnti (tempRnti, assignedRnti);
+  m_rrcSapUser->SendRrcConnectionSetup (tempRnti, msg);
+}
+
+void
+LteEnbRrc::CancelTempRntiRequestTimeout (uint16_t tempRnti)
+{
+  if (!HasUeManager (tempRnti))
+    {
+      return;
+    }
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (tempRnti);
+  if (ueManager->GetState () == UeManager::INITIAL_RANDOM_ACCESS)
+    {
+      ueManager->CancelPendingEvents ();
+    }
+}
+
+void
 LteEnbRrc::DoRecvRrcConnectionResumeRequestNb (uint16_t rnti, NbIotRrcSap::RrcConnectionResumeRequestNb msg)
 {
   NS_LOG_FUNCTION (this << rnti);
@@ -2867,7 +2995,14 @@ void
 LteEnbRrc::DoRecvRrcConnectionSetupCompleted (uint16_t rnti, LteRrcSap::RrcConnectionSetupCompleted msg)
 {
   NS_LOG_FUNCTION (this << rnti);
-  GetUeManagerbyRnti (rnti)->RecvRrcConnectionSetupCompleted (msg);
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (rnti);
+  NS_LOG_UNCOND ("[ENB][MSG5][SETUP-COMPLETE] imsi=" << ueManager->GetImsi ()
+                 << " C-RNTI=" << rnti);
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogMsg5Enb (ueManager->GetImsi (), rnti);
+    }
+  ueManager->RecvRrcConnectionSetupCompleted (msg);
 }
 
 void
@@ -3873,4 +4008,3 @@ void LteEnbRrc::LogDataReception(uint32_t imsi){
         logfile.close();
 }
 } // namespace ns3
-

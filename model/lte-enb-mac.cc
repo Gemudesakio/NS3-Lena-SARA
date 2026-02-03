@@ -34,6 +34,7 @@
 #include "lte-control-messages.h"
 #include "lte-enb-net-device.h"
 #include "lte-ue-net-device.h"
+#include "sara-report.h"
 
 #include "ns3/lte-enb-mac.h"
 #include <ns3/lte-radio-bearer-tag.h>
@@ -51,6 +52,7 @@
 #include <algorithm>
 #include <fstream>
 #include "sara-ul-id-tag.h"    // (1) Tag con cd para Msg3 (dmrs ignorado)
+#include "sara-msg3-group-tag.h"   // Tag para agrupar Msg3 por ventana
 
 namespace ns3 {
 
@@ -87,6 +89,7 @@ public:
   virtual RachConfig GetRachConfig ();
   virtual RachConfigNb GetRachConfigNb ();
   virtual void NotifyConnectionSuccessful(uint16_t rnti);
+  virtual void MapTempRntiToDefRnti (uint16_t tempRnti, uint16_t assignedRnti);
   virtual AllocateNcRaPreambleReturnValue AllocateNcRaPreamble (uint16_t rnti);
   virtual void SetLogDir(std::string logdir);
 
@@ -169,6 +172,12 @@ EnbMacMemberLteEnbCmacSapProvider::GetRachConfigNb ()
 void 
 EnbMacMemberLteEnbCmacSapProvider::NotifyConnectionSuccessful(uint16_t rnti){
   m_mac->DoNotifyConnectionSuccessful(rnti);
+}
+
+void
+EnbMacMemberLteEnbCmacSapProvider::MapTempRntiToDefRnti (uint16_t tempRnti, uint16_t assignedRnti)
+{
+  m_mac->DoMapTempRntiToDefRnti (tempRnti, assignedRnti);
 }
 
 LteEnbCmacSapProvider::AllocateNcRaPreambleReturnValue
@@ -1354,12 +1363,36 @@ LteEnbMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
           DynamicCast<DlHarqFeedbackNbiotControlMessage> (msg);
       // If connectionSuccessful == false, device hasnt completed its Connection yet
       // Device has received MSG4 and neeeds UL-Resources for MSG5
-      if (!m_connectionSuccessful[dlharq->GetRnti ()])
+      uint16_t tempRnti = dlharq->GetRnti ();
+      std::map<uint16_t, std::deque<uint16_t> >::iterator mapIt = m_tempRntiToDefRnti.find (tempRnti);
+      bool hasSaraQueue = (mapIt != m_tempRntiToDefRnti.end ()) && (!mapIt->second.empty ());
+
+      if (hasSaraQueue || !m_connectionSuccessful[tempRnti])
         {
-          // MIGHT BE NOT NEEDED ANYMORE
-          m_schedulerNb->ScheduleUlRlcBufferReq(dlharq->GetRnti (), m_ueStoredBSR[dlharq->GetRnti()]);
-          m_connectionSuccessful[dlharq->GetRnti ()] = true;
-          m_ueStoredBSR[dlharq->GetRnti()] = 0;
+          uint16_t grantRnti = tempRnti;
+          if (hasSaraQueue)
+            {
+              grantRnti = mapIt->second.front ();
+              mapIt->second.pop_front ();
+              if (mapIt->second.empty ())
+                {
+                  m_tempRntiToDefRnti.erase (mapIt);
+                }
+            }
+
+          uint16_t bsr = m_ueStoredBSR[tempRnti];
+          m_schedulerNb->ScheduleUlRlcBufferReq (grantRnti, bsr);
+
+          if (!hasSaraQueue)
+            {
+              m_connectionSuccessful[tempRnti] = true;
+              m_ueStoredBSR[tempRnti] = 0;
+            }
+          else if (m_tempRntiToDefRnti.find (tempRnti) == m_tempRntiToDefRnti.end ())
+            {
+              m_connectionSuccessful[tempRnti] = true;
+              m_ueStoredBSR[tempRnti] = 0;
+            }
         }
     }
   else
@@ -1443,11 +1476,11 @@ void
 LteEnbMac::DoReportMacCeToScheduler (MacCeListElement_s bsr)
 {
   NS_LOG_FUNCTION (this);
-  NS_LOG_DEBUG (this << " bsr Size " << (uint16_t) m_ulCeReceived.size ());
+  // omit BSR debug logs for cleaner output
   //send to LteCcmMacSapUser
   m_ulCeReceived.push_back (
       bsr); // this to called when LteUlCcmSapProvider::ReportMacCeToScheduler is called
-  NS_LOG_DEBUG (this << " bsr Size after push_back " << (uint16_t) m_ulCeReceived.size ());
+  // omit BSR debug logs for cleaner output
 }
 
 bool
@@ -1491,22 +1524,49 @@ LteEnbMac::ResolveMsg3Window (uint16_t rnti, uint64_t windowEnd)
       counts[e->codebook] += 1;
     }
 
+  uint32_t acceptedTotal = 0;
+  for (std::vector<Msg3BufferEntry>::const_iterator e = it->second.entries.begin ();
+       e != it->second.entries.end (); ++e)
+    {
+      if (counts[e->codebook] == 1)
+        {
+          ++acceptedTotal;
+        }
+    }
+
+  uint32_t remainingAccepted = acceptedTotal;
   for (std::vector<Msg3BufferEntry>::const_iterator e = it->second.entries.begin ();
        e != it->second.entries.end (); ++e)
     {
       if (counts[e->codebook] > 1)
         {
-          NS_LOG_INFO ("[ENB][MSG3][SARA-COLLISION] rnti="
+          NS_LOG_INFO ("[ENB][MSG3][SARA-COLLISION] TC-RNTI="
                        << rnti
                        << " cd=" << (uint32_t) e->codebook
                        << " count=" << counts[e->codebook]);
+          if (SaraReport::IsEnabled ())
+            {
+              SaraReport::LogMsg3Separated (rnti, e->codebook, false);
+            }
           continue;
         }
 
-      NS_LOG_INFO ("[ENB][MSG3][SARA-SEPARATED] rnti="
+      NS_LOG_INFO ("[ENB][MSG3][SARA-SEPARATED] TC-RNTI="
                    << rnti
                    << " cd=" << (uint32_t) e->codebook
                    << " accepted");
+      if (SaraReport::IsEnabled ())
+        {
+          SaraReport::LogMsg3Separated (rnti, e->codebook, true);
+        }
+      if (remainingAccepted > 0)
+        {
+          bool isLast = (remainingAccepted == 1);
+          SaraMsg3GroupTag groupTag;
+          groupTag.Set (rnti, windowEnd, isLast);
+          e->p->AddPacketTag (groupTag);
+          --remainingAccepted;
+        }
       if (ForwardMsg3ToRlc (e->p, rnti, e->lcid))
         {
           ++m_msg3AcceptedCount;
@@ -1539,7 +1599,7 @@ LteEnbMac::DoReceivePhyPdu (Ptr<Packet> p)
       ++m_msg3RxCount;
       bool countMsg3Accepted = false;
 
-      NS_LOG_INFO ("[ENB][MSG3][RX] rnti=" << rnti                          // (12)
+      NS_LOG_INFO ("[ENB][MSG3][RX] TC-RNTI=" << rnti                       // (12)
                    << " lcid="      << (uint32_t) lcid
                    << " bufferSize=" << buffersize
                    << " pktUid="    << p->GetUid ());
@@ -1553,9 +1613,13 @@ LteEnbMac::DoReceivePhyPdu (Ptr<Packet> p)
           saraTag.Get (cd, dmrs);                                           // (17)
           (void) dmrs;
 
-          NS_LOG_INFO ("[ENB][MSG3][TAG-SARA] rnti=" << rnti                // (18)
+          NS_LOG_INFO ("[ENB][MSG3][TAG-SARA] TC-RNTI=" << rnti             // (18)
                        << " lcid=" << (uint32_t) lcid
                        << " cd="   << (uint32_t) cd);
+          if (SaraReport::IsEnabled ())
+            {
+              SaraReport::LogMsg3EnbRx (rnti, lcid, true, cd);
+            }
 
           uint64_t nowSubframe = static_cast<uint64_t> (Simulator::Now ().GetMilliSeconds ());
           uint64_t windowEnd = nowSubframe;
@@ -1589,8 +1653,12 @@ LteEnbMac::DoReceivePhyPdu (Ptr<Packet> p)
         }
       else                                                                  // (19)
         {
-          NS_LOG_INFO ("[ENB][MSG3][NO-SARA-TAG] rnti=" << rnti             // (20)
+          NS_LOG_INFO ("[ENB][MSG3][NO-SARA-TAG] TC-RNTI=" << rnti          // (20)
                        << " lcid=" << (uint32_t) lcid);
+          if (SaraReport::IsEnabled ())
+            {
+              SaraReport::LogMsg3EnbRx (rnti, lcid, false, 0);
+            }
           countMsg3Accepted = true;
         }
       // ===== FIN BLOQUE NUEVO =====
@@ -1709,6 +1777,22 @@ void LteEnbMac::DoSetLogDir(std::string logdir){
   m_mac_logging = true;
 }
 void
+LteEnbMac::DoMapTempRntiToDefRnti (uint16_t tempRnti, uint16_t assignedRnti)
+{
+  m_tempRntiToDefRnti[tempRnti].push_back (assignedRnti);
+
+  std::map<uint16_t, uint16_t>::const_iterator bsrIt = m_ueStoredBSR.find (tempRnti);
+  if (bsrIt != m_ueStoredBSR.end ())
+    {
+      m_ueStoredBSR[assignedRnti] = bsrIt->second;
+    }
+  m_connectionSuccessful[assignedRnti] = false;
+  if (m_schedulerNb)
+    {
+      m_schedulerNb->CloneUeConfig (tempRnti, assignedRnti);
+    }
+}
+void
 LteEnbMac::DoRemoveUe (uint16_t rnti)
 {
   NS_LOG_FUNCTION (this << " rnti=" << rnti);
@@ -1717,8 +1801,33 @@ LteEnbMac::DoRemoveUe (uint16_t rnti)
   m_cschedSapProvider->CschedUeReleaseReq (params);
   m_rlcAttached.erase (rnti);
   m_miDlHarqProcessesPackets.erase (rnti);
+  m_tempRntiToDefRnti.erase (rnti);
+  for (std::map<uint16_t, std::deque<uint16_t> >::iterator it = m_tempRntiToDefRnti.begin ();
+       it != m_tempRntiToDefRnti.end (); )
+    {
+      std::deque<uint16_t> &q = it->second;
+      for (std::deque<uint16_t>::iterator qit = q.begin (); qit != q.end (); )
+        {
+          if (*qit == rnti)
+            {
+              qit = q.erase (qit);
+            }
+          else
+            {
+              ++qit;
+            }
+        }
+      if (q.empty ())
+        {
+          it = m_tempRntiToDefRnti.erase (it);
+        }
+      else
+        {
+          ++it;
+        }
+    }
 
-  NS_LOG_DEBUG ("start checking for unprocessed preamble for rnti: " << rnti);
+  NS_LOG_DEBUG ("start checking for unprocessed preamble for TC-RNTI: " << rnti);
   //remove unprocessed preamble received for RACH during handover
   std::map<uint8_t, NcRaPreambleInfo>::iterator jt = m_allocatedNcRaPreambleMap.begin ();
   while (jt != m_allocatedNcRaPreambleMap.end ())

@@ -182,6 +182,14 @@ public:
 
 
   virtual void NotifyConnectionSuccessful(uint16_t rnti) = 0;
+
+  /**
+   * Register mapping from temporary RNTI (RA) to assigned C-RNTI (SARA).
+   *
+   * \param tempRnti temporary RNTI used for Msg4
+   * \param assignedRnti definitive C-RNTI assigned by eNB
+   */
+  virtual void MapTempRntiToDefRnti (uint16_t tempRnti, uint16_t assignedRnti) = 0;
   /**
    * \brief AllocateNcRaPreambleReturnValue structure
    * 

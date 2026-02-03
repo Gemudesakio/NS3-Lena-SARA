@@ -33,6 +33,7 @@
 #include "lte-ue-mac.h"
 #include "lte-ue-net-device.h"
 #include "lte-radio-bearer-tag.h"
+#include "sara-report.h"
 #include "nb-iot-data-volume-and-power-headroom-tag.h"
 #include "nb-iot-buffer-status-report-tag.h"
 #include <ns3/ff-mac-common.h>
@@ -449,18 +450,30 @@ LteUeMac::DoTransmitPdu (LteMacSapProvider::TransmitPduParameters params)
           stag.Set (cd, dmrs);                                              
           params.pdu->AddPacketTag (stag);                                  
 
-          NS_LOG_INFO ("[UE][MSG3][TAG-SARA] rnti="                         
-                       << (uint32_t) params.rnti
+          NS_LOG_INFO ("[UE][MSG3][TAG-SARA] node=" << Simulator::GetContext ()
+                       << " imsi=" << m_imsi
+                       << " TC-RNTI=" << (uint32_t) params.rnti
                        << " lcid="  << (uint32_t) params.lcid
                        << " cd="    << (uint32_t) cd
                        << " dmrs="  << (uint32_t) dmrs);
+          if (SaraReport::IsEnabled ())
+            {
+              SaraReport::LogMsg3Ue (Simulator::GetContext (), m_imsi, params.rnti,
+                                     params.lcid, true, cd, dmrs);
+            }
         }
       else                                                                  
         {
-          NS_LOG_INFO ("[UE][MSG3][NO-SARA] rnti="                          
-                       << (uint32_t) params.rnti
+          NS_LOG_INFO ("[UE][MSG3][NO-SARA] node=" << Simulator::GetContext ()
+                       << " imsi=" << m_imsi
+                       << " TC-RNTI=" << (uint32_t) params.rnti
                        << " lcid=" << (uint32_t) params.lcid
                        << " (sin cd/dmrs)");
+          if (SaraReport::IsEnabled ())
+            {
+              SaraReport::LogMsg3Ue (Simulator::GetContext (), m_imsi, params.rnti,
+                                     params.lcid, false, 0, 0);
+            }
         }
       // ===== FIN NUEVO BLOQUE SARA =====
     }
@@ -619,8 +632,14 @@ LteUeMac::SendRaPreamble (bool contention)
   NS_ASSERT (m_subframeNo > 0); // sanity check for subframe starting at 1
   m_raRnti = m_subframeNo - 1;
   m_uePhySapProvider->SendRachPreamble (m_raPreambleId, m_raRnti);
-  NS_LOG_INFO (this << " [UE][MSG1] sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
+  NS_LOG_INFO (this << " [UE][MSG1] node=" << Simulator::GetContext ()
+                    << " imsi=" << m_imsi
+                    << " sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
                     << (uint32_t) m_raRnti);
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogMsg1 (Simulator::GetContext (), m_imsi, m_raPreambleId, m_raRnti);
+    }
   // 3GPP 36.321 5.1.4
   //Time raWindowBegin = MilliSeconds (3);
   //Time raWindowEnd = MilliSeconds (3 + m_rachConfig.raResponseWindowSize);
@@ -655,8 +674,14 @@ LteUeMac::SendRaPreambleNb (bool contention)
   Simulator::Schedule (MilliSeconds (time), &LteUePhySapProvider::SendNprachPreamble,
                        m_uePhySapProvider, m_raPreambleId, m_raRnti,
                        NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel));
-  NS_LOG_INFO (this << " [UE][MSG1] sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
+  NS_LOG_INFO (this << " [UE][MSG1] node=" << Simulator::GetContext ()
+                    << " imsi=" << m_imsi
+                    << " sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
                     << (uint32_t) m_raRnti);
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogMsg1 (Simulator::GetContext (), m_imsi, m_raPreambleId, m_raRnti);
+    }
 
   if (m_mac_logging)
   {
@@ -710,8 +735,18 @@ LteUeMac::RecvRaResponse (BuildRarListElement_s raResponse)
   NS_LOG_FUNCTION (this);
   m_waitingForRaResponse = false;
   m_noRaResponseReceivedEvent.Cancel ();
-  NS_LOG_INFO ("got RAR for RAPID " << (uint32_t) m_raPreambleId
-                                    << ", setting T-C-RNTI = " << raResponse.m_rnti);
+  NS_LOG_INFO ("[UE][RAR][SELECT] node=" << Simulator::GetContext ()
+                                          << " imsi=" << m_imsi
+                                          << " RAPID=" << (uint32_t) m_raPreambleId
+                                          << " T-CRNTI=" << raResponse.m_rnti);
+  if (SaraReport::IsEnabled ())
+    {
+      const bool sara = m_saraGroupActive;
+      const uint8_t groupSize = sara ? m_saraGroupSize : 0;
+      const uint8_t tag = sara ? m_saraTag : 0;
+      SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, m_raPreambleId,
+                                 raResponse.m_rnti, sara, groupSize, tag);
+    }
   m_rnti = raResponse.m_rnti;
   m_cmacSapUser->SetTemporaryCellRnti (m_rnti);
   // in principle we should wait for contention resolution,
@@ -753,8 +788,18 @@ LteUeMac::RecvRaResponseNb (NbIotRrcSap::RarPayload raResponse)
   NS_LOG_FUNCTION (this);
   m_waitingForRaResponse = false;
   m_noRaResponseReceivedEvent.Cancel ();
-  NS_LOG_INFO ("got RAR for RAPID " << (uint32_t) m_raPreambleId
-                                    << ", setting T-C-RNTI = " << raResponse.cellRnti);
+  NS_LOG_INFO ("[UE][RAR][SELECT] node=" << Simulator::GetContext ()
+                                          << " imsi=" << m_imsi
+                                          << " RAPID=" << (uint32_t) m_raPreambleId
+                                          << " T-CRNTI=" << raResponse.cellRnti);
+  if (SaraReport::IsEnabled ())
+    {
+      const bool sara = m_saraGroupActive;
+      const uint8_t groupSize = sara ? m_saraGroupSize : 0;
+      const uint8_t tag = sara ? m_saraTag : 0;
+      SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, m_raPreambleId,
+                                 raResponse.cellRnti, sara, groupSize, tag);
+    }
                                     
   if (m_mac_logging)
   {
@@ -835,12 +880,11 @@ LteUeMac::RaResponseTimeout (bool contention)
                             m_rachConfig.preambleTransMax + 1);
   if (m_preambleTransmissionCounter == m_rachConfig.preambleTransMax + 1)
     {
-      NS_LOG_INFO ("RAR timeout, preambleTransMax reached => giving up");
+      // omit timeout logs for cleaner output
       m_cmacSapUser->NotifyRandomAccessFailed ();
     }
   else
     {
-      NS_LOG_INFO ("RAR timeout, re-send preamble");
       if (contention)
         {
           RandomlySelectAndSendRaPreamble ();
@@ -860,6 +904,12 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
   // and retries in the next CE level, until preambleTransMax is reached
   NS_LOG_FUNCTION (this << contention);
   m_waitingForRaResponse = false;
+  m_saraGroupActive = false;
+  m_saraGroupSize = 1;
+  m_saraTag = 0;
+  m_saraDesiredTagSet = false;
+  m_saraDesiredTag = 0;
+  m_saraWaitingForTag = false;
   //NS_BUILD_DEBUG(std::cout << "Window End" << std::endl);
   // 3GPP 36.321 5.1.4
   ++m_preambleTransmissionCounter;
@@ -869,8 +919,7 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
                             m_rachConfig.preambleTransMax);
   if (m_preambleTransmissionCounter == m_radioResourceConfig.rachConfigCommon.preambleTransMaxCE)
     {
-      NS_LOG_INFO ("RAR timeout, preambleTransMax reached => giving up");
-      LogMessage("LteUeMac::RaResponseTimeoutNb,RAR timeout: preambleTransMax reached");
+      // omit timeout logs for cleaner output
 
       m_cmacSapUser->NotifyRandomAccessFailed ();
     }
@@ -885,8 +934,7 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
           if (m_CeLevel.coverageEnhancementLevel == m_radioResourceConfig.nprachConfig.nprachParametersList.nprachParametersNb0.coverageEnhancementLevel) // CE0
             {
               // Increase to CE1
-              NS_LOG_INFO ("RAR timeout, MaxNumPreambleAttemptCE reached => increasing CE level to CE1");
-              LogMessage("LteUeMac::RaResponseTimeoutNb,RAR timeout, MaxNumPreambleAttemptCE reached => increasing CE level to CE1");              
+              // omit timeout logs for cleaner output
               m_CeLevel = m_radioResourceConfig.nprachConfig.nprachParametersList.nprachParametersNb1;
               m_rachConfigCe = m_radioResourceConfig.rachConfigCommon.rachInfoList.rachInfo2;
               if(m_edt){
@@ -896,8 +944,7 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
           else if (m_CeLevel.coverageEnhancementLevel == m_radioResourceConfig.nprachConfig.nprachParametersList.nprachParametersNb1.coverageEnhancementLevel) // CE1
             {
               // Increase to CE2
-              NS_LOG_INFO ("RAR timeout, MaxNumPreambleAttemptCE reached => increasing CE level to CE2");
-              LogMessage("LteUeMac::RaResponseTimeoutNb,RAR timeout, MaxNumPreambleAttemptCE reached => increasing CE level to CE2");   
+              // omit timeout logs for cleaner output
               m_CeLevel = m_radioResourceConfig.nprachConfig.nprachParametersList.nprachParametersNb2;
               m_rachConfigCe = m_radioResourceConfig.rachConfigCommon.rachInfoList.rachInfo3;
               if(m_edt){
@@ -907,8 +954,7 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
           else if (m_CeLevel.coverageEnhancementLevel == m_radioResourceConfig.nprachConfig.nprachParametersList.nprachParametersNb2.coverageEnhancementLevel) // CE2
             {
               // Can't increase further
-              NS_LOG_INFO ("RAR timeout, MaxNumPreambleAttemptCE in CE2 reached => giving up");
-              LogMessage("LteUeMac::RaResponseTimeoutNb,RAR timeout, MaxNumPreambleAttemptCE in CE2 reached => giving up");  
+              // omit timeout logs for cleaner output
               m_cmacSapUser->NotifyRandomAccessFailed ();
               return;
             }
@@ -928,8 +974,7 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
 
           }
         }
-      NS_LOG_INFO ("RAR timeout, re-send preamble");
-      LogMessage("LteUeMac::RaResponseTimeoutNb,RAR timeout, re-send preamble");  
+      // omit timeout logs for cleaner output
       if (contention)
         {
           RandomlySelectAndSendRaPreambleNb ();
@@ -964,6 +1009,12 @@ LteUeMac::DoStartContentionBasedRandomAccessProcedure ()
   NS_ASSERT_MSG (m_rachConfigured, "RACH not configured");
   m_preambleTransmissionCounter = 0;
   m_backoffParameter = 0;
+  m_saraGroupActive = false;
+  m_saraGroupSize = 1;
+  m_saraTag = 0;
+  m_saraDesiredTagSet = false;
+  m_saraDesiredTag = 0;
+  m_saraWaitingForTag = false;
   RandomlySelectAndSendRaPreamble ();
 }
 void
@@ -976,6 +1027,12 @@ LteUeMac::DoStartRandomAccessProcedureNb (bool edt)
   m_preambleTransmissionCounter = 0;
   m_preambleTransmissionCounterCe = 0;
   m_edt = edt;
+  m_saraGroupActive = false;
+  m_saraGroupSize = 1;
+  m_saraTag = 0;
+  m_saraDesiredTagSet = false;
+  m_saraDesiredTag = 0;
+  m_saraWaitingForTag = false;
   // Check CE Level
   double rsrp = m_uePhySapProvider->GetRSRP ();
   //NS_BUILD_DEBUG (std::cout << "RSRP: " << rsrp << "dBm" << std::endl);
@@ -1319,8 +1376,9 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
                                   // minimum RLC overhead due to header
                                   rlcOverhead = 2;
                                 }
-                              NS_LOG_DEBUG (this << " serve tx DATA, bytes " << bytesForThisLc
-                                                 << ", RLC overhead " << rlcOverhead);
+                              NS_LOG_DEBUG ("[UE][UL-DATA-TX] rnti=" << m_rnti
+                                              << " bytes=" << bytesForThisLc
+                                              << " rlcOv=" << rlcOverhead);
                               txOpParams.bytes = bytesForThisLc;
                               txOpParams.layer = 0;
                               txOpParams.harqId = 0;
@@ -1408,19 +1466,14 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
     {
       uint8_t myRapid = NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel)            
                       + m_raPreambleId;                                                       
-      bool processed = false;                                                               
-      bool desiredTagSet = false;                                                           
-      uint8_t desiredTag = 0;                                                               
+      bool processed = false;
+      bool sawSaraForMyRapid = false;
+      uint8_t seenSaraGroupSize = 0;
 
       // (A) Escanea toda la lista de RARs recibidos
       for (auto it = rarMsg->RarListBegin (); it != rarMsg->RarListEnd (); ++it)              
       {
-        NS_LOG_INFO ("[UE][RAR][RX] RA-RNTI=" << (uint32_t) raRnti                            
-                     << " RAPID="   << (uint32_t) it->rapId
-                     << " T-CRNTI=" << it->cellRnti
-                     << " SARA[group=" << (it->saraGroup ? "1":"0")
-                     << ", size="   << (uint32_t) it->saraGroupSize
-                     << ", tag="    << (uint32_t) it->saraTag << "]");
+        // omit per-RAR logs to keep output clean
 
         if (it->rapId != myRapid)                                                            
         {
@@ -1429,48 +1482,69 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
 
         if (it->saraGroup)                                                                
         {
-          if (it->saraGroupSize > 0)                                                          
-          {
-            if (!desiredTagSet)
-              {
-                Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
-                desiredTag = rng->GetInteger (0, it->saraGroupSize - 1);
-                desiredTagSet = true;
-
-                NS_LOG_INFO ("[UE][RAR][CHOICE-SARA] rng tag=" << (uint32_t) desiredTag
-                             << " groupSize=" << (uint32_t) it->saraGroupSize);
-              }
-
-            if (it->saraTag == desiredTag)                                                    
+          sawSaraForMyRapid = true;
+          seenSaraGroupSize = it->saraGroupSize;
+          if (it->saraGroupSize > 0)
             {
-              m_saraGroupActive = it->saraGroup;                                                       
-              m_saraGroupSize   = it->saraGroupSize;                                          
-              m_saraTag         = it->saraTag;                                                
+              if (!m_saraDesiredTagSet)
+                {
+                  Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+                  m_saraDesiredTag = rng->GetInteger (0, it->saraGroupSize - 1);
+                  m_saraDesiredTagSet = true;
 
-              NS_LOG_INFO ("[UE][RAR][SARA][SELECT] RAPID=" << (uint32_t) myRapid
-                           << " group=" << (uint32_t) m_saraGroupSize
-                           << " tag="   << (uint32_t) m_saraTag);
+                }
 
-              RecvRaResponseNb (it->rarPayload);                                              
-              processed = true;                                                               
-              break;                                                                          
+              if (it->saraTag == m_saraDesiredTag)
+                {
+                  m_saraGroupActive = true;
+                  m_saraGroupSize   = it->saraGroupSize;
+                  m_saraTag         = it->saraTag;
+                  m_saraWaitingForTag = false;
+
+                  NS_LOG_INFO ("[UE][RAR][SELECT] node=" << Simulator::GetContext ()
+                               << " imsi=" << m_imsi
+                               << " RAPID=" << (uint32_t) myRapid
+                               << " group=" << (uint32_t) m_saraGroupSize
+                               << " tag="   << (uint32_t) m_saraTag);
+
+                  RecvRaResponseNb (it->rarPayload);
+                  processed = true;
+                  break;
+                }
             }
-          }
         }
       } // fin for
 
-      // (C) Si no se procesó ningún RAR SARA, usar la ruta por defecto (primer RAR con mi RAPID)
-      if (!processed)                                                                         
+      if (processed)
+        {
+          return;
+        }
+
+      // (C) Si hubo SARA para mi RAPID pero aún no llegó mi tag, esperar
+      if (sawSaraForMyRapid)
+        {
+          m_saraWaitingForTag = true;
+          (void) seenSaraGroupSize;
+          return;
+        }
+
+      // (D) Si no hubo SARA para mi RAPID, usar ruta legacy por defecto
+      if (!processed)
       {
         for (auto it = rarMsg->RarListBegin (); it != rarMsg->RarListEnd (); ++it)            
         {
           if (it->rapId == myRapid)                                                           
           {
-            m_saraGroupActive = false;                                                        
-            m_saraGroupSize   = 1;                                                            
-            m_saraTag         = 0;                                                            
+            m_saraGroupActive = false;
+            m_saraGroupSize   = 1;
+            m_saraTag         = 0;
+            m_saraDesiredTagSet = false;
+            m_saraDesiredTag = 0;
+            m_saraWaitingForTag = false;
 
-            NS_LOG_INFO ("[UE][RAR][DEFAULT] elegido RAPID=" << (uint32_t) myRapid);          
+            NS_LOG_INFO ("[UE][RAR][SELECT] node=" << Simulator::GetContext ()
+                         << " imsi=" << m_imsi
+                         << " RAPID=" << (uint32_t) myRapid);
             RecvRaResponseNb (it->rarPayload);                                                
             break;                                                                            
           }
@@ -1625,8 +1699,9 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
                         // minimum RLC overhead due to header
                         rlcOverhead = 2;
                       }
-                    NS_LOG_DEBUG (this << " serve tx DATA, bytes " << bytesforallLc 
-                                        << ", RLC overhead " << rlcOverhead);
+                    NS_LOG_DEBUG ("[UE][UL-DATA-TX] rnti=" << bsr->second.rnti
+                                    << " bytes=" << bytesforallLc
+                                    << " rlcOv=" << rlcOverhead);
                     if(bsr->second.txQueueSize > bytesforallLc){
                       txOpParams.bytes = bytesforallLc;
                       bsr->second.txQueueSize -= bytesforallLc-rlcOverhead;

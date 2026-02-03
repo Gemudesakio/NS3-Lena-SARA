@@ -353,6 +353,9 @@ private:
   bool    m_saraGroupActive = false; // (1) true si el RAR recibido indica grupo SARA
   uint8_t m_saraGroupSize   = 1;     // (2) tamaño del grupo SARA (N)
   uint8_t m_saraTag         = 0;     // (3) etiqueta local del UE en el grupo [0..N-1]
+  bool    m_saraDesiredTagSet = false; // (4) true si ya se eligió tag deseado
+  uint8_t m_saraDesiredTag    = 0;     // (5) tag deseado dentro del grupo
+  bool    m_saraWaitingForTag = false; // (6) esperando RAR con el tag deseado
 
   NbIotRrcSap::NprachParametersNb m_CeLevel; // CE Level based on RSRP
   NbIotRrcSap::NprachParametersNb m_CeLevelRapRetries; // CE Level based on RSRP, but might be increased due to RA failures

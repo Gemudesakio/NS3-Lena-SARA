@@ -29,6 +29,7 @@
 #define LTE_ENB_MAC_H
 
 
+#include <deque>
 #include <map>
 #include <vector>
 #include <ns3/lte-common.h>
@@ -494,6 +495,7 @@ private:
   std::map<uint8_t, uint32_t> m_receivedRachPreambleCount; ///< received RACH preamble count
 
   std::map<uint16_t, uint32_t> m_rapIdRntiMap; ///< RAPID RNTI map
+  std::map<uint16_t, std::deque<uint16_t> > m_tempRntiToDefRnti; ///< SARA: temp RNTI -> assigned C-RNTI queue
   /// component carrier Id used to address sap
   uint8_t m_componentCarrierId;
   
@@ -503,6 +505,7 @@ private:
   */
 
   void DoReportBufferStatusNb (LteMacSapProvider::ReportBufferStatusParameters params, NbIotRrcSap::NpdcchMessage::SearchSpaceType searchspace);
+  void DoMapTempRntiToDefRnti (uint16_t tempRnti, uint16_t assignedRnti);
 
   /**
   * \brief Subrame Indication function

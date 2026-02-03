@@ -36,6 +36,8 @@
 #include "lte-enb-rrc.h"
 #include "lte-enb-net-device.h"
 #include "lte-ue-net-device.h"
+#include "sara-msg3-group-tag.h"
+#include "sara-report.h"
 
 #include <chrono>
 #include <iomanip>
@@ -187,6 +189,8 @@ void
 LteUeRrcProtocolReal::DoSendRrcConnectionSetupCompleted (LteRrcSap::RrcConnectionSetupCompleted msg)
 {
   Ptr<Packet> packet = Create<Packet> ();
+
+  m_rnti = m_rrc->GetRnti ();
 
   RrcConnectionSetupCompleteHeader rrcConnectionSetupCompleteHeader;
   rrcConnectionSetupCompleteHeader.SetMessage (msg);
@@ -468,6 +472,18 @@ LteUeRrcProtocolReal::DoReceivePdcpPdu (Ptr<Packet> p)
       // RrcConnectionSetup
       p->RemoveHeader (rrcConnectionSetupHeader);
       rrcConnectionSetupMsg = rrcConnectionSetupHeader.GetMessage ();
+      if (m_rrc && (m_rrc->GetState () != LteUeRrc::IDLE_CONNECTING))
+        {
+          NS_LOG_INFO ("Dropping Msg4 in state " << (uint16_t) m_rrc->GetState ());
+          break;
+        }
+      if ((rrcConnectionSetupMsg.ueIdentity != 0) && m_rrc
+          && (rrcConnectionSetupMsg.ueIdentity != m_rrc->GetImsi ()))
+        {
+          NS_LOG_INFO ("Dropping Msg4 for IMSI " << rrcConnectionSetupMsg.ueIdentity
+                       << " at UE IMSI " << m_rrc->GetImsi ());
+          break;
+        }
       m_ueRrcSapProvider->RecvRrcConnectionSetup (rrcConnectionSetupMsg);
       break;
     case 4:
@@ -784,6 +800,25 @@ LteEnbRrcProtocolReal::DoSendSystemInformationNb (uint16_t cellId, NbIotRrcSap::
 void 
 LteEnbRrcProtocolReal::DoSendRrcConnectionSetup (uint16_t rnti, LteRrcSap::RrcConnectionSetup msg)
 {
+  if ((msg.ueIdentity != 0) || (msg.assignedRnti != 0))
+    {
+      NS_LOG_UNCOND ("[ENB][MSG4][SARA-TX] TC-RNTI=" << rnti
+                     << " imsi=" << msg.ueIdentity
+                     << " C-RNTI=" << msg.assignedRnti);
+      if (SaraReport::IsEnabled ())
+        {
+          SaraReport::LogMsg4Enb (rnti, msg.ueIdentity, msg.assignedRnti, true);
+        }
+    }
+  else
+    {
+      NS_LOG_UNCOND ("[ENB][MSG4][LEGACY-TX] TC-RNTI=" << rnti
+                     << " C-RNTI=" << rnti);
+      if (SaraReport::IsEnabled ())
+        {
+          SaraReport::LogMsg4Enb (rnti, 0, rnti, false);
+        }
+    }
   Ptr<Packet> packet = Create<Packet> ();
 
   RrcConnectionSetupHeader rrcConnectionSetupHeader;
@@ -974,11 +1009,27 @@ LteEnbRrcProtocolReal::DoReceivePdcpPdu (uint16_t rnti, Ptr<Packet> p)
       m_enbRrcSapProvider->RecvRrcConnectionReestablishmentRequest (rnti,rrcConnectionReestablishmentRequestMsg);
       break;
     case 1:
-      p->RemoveHeader (rrcConnectionRequestHeader);
-      LteRrcSap::RrcConnectionRequest rrcConnectionRequestMsg;
-      rrcConnectionRequestMsg = rrcConnectionRequestHeader.GetMessage ();
-      m_enbRrcSapProvider->RecvRrcConnectionRequest (rnti,rrcConnectionRequestMsg);
-      break;
+      {
+        SaraMsg3GroupTag groupTag;
+        bool hasGroupTag = p->PeekPacketTag (groupTag);
+        p->RemoveHeader (rrcConnectionRequestHeader);
+        LteRrcSap::RrcConnectionRequest rrcConnectionRequestMsg;
+        rrcConnectionRequestMsg = rrcConnectionRequestHeader.GetMessage ();
+        if (hasGroupTag)
+          {
+            uint16_t tempRnti = 0;
+            uint64_t windowEnd = 0;
+            bool isLast = false;
+            groupTag.Get (tempRnti, windowEnd, isLast);
+            p->RemovePacketTag (groupTag);
+            m_enbRrcSapProvider->RecvRrcConnectionRequestGrouped (tempRnti, windowEnd, isLast, rrcConnectionRequestMsg);
+          }
+        else
+          {
+            m_enbRrcSapProvider->RecvRrcConnectionRequest (rnti, rrcConnectionRequestMsg);
+          }
+        break;
+      }
     case 2:
       p->RemoveHeader(rrcConnectionResumeRequestNbHeader);
       NbIotRrcSap::RrcConnectionResumeRequestNb rrcConnectionResumeRequestNbMsg;

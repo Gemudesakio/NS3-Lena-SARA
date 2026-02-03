@@ -4,6 +4,11 @@
 #include "ns3/lte-module.h"
 #include "ns3/point-to-point-epc-helper.h"
 #include "ns3/internet-module.h"
+#include "ns3/sara-report.h"
+#include "ns3/system-path.h"
+
+#include <ctime>
+#include <list>
 
 using namespace ns3;
 
@@ -19,10 +24,23 @@ static void DoAttach (Ptr<LteHelper> lte, Ptr<NetDevice> ue, Ptr<NetDevice> enb)
 int main (int argc, char *argv[])
 {
   // ---------- Parámetros ----------
-  uint32_t numUe      = 70;     // muchos UEs para provocar colisión
+  uint32_t numUe      = 15;     // muchos UEs para provocar colisión
   double   cellRadius = 200.0;
-  uint32_t stopMs     = 6000;   // parar pronto: ver RAR y cortar antes de líos de Msg3
+  uint32_t stopMs     = 5000;   // sim corta para validar Msg5 rápidamente
   bool     useNbSuspend = false; // usa AttachSuspendedNb (también sirve Attach normal)
+  bool     reportEnabled = true;
+  std::string reportPrefix = "rc1_sn2_report";
+  std::string reportDir = "";
+  std::string reportRunId = "";
+
+  CommandLine cmd;
+  cmd.AddValue ("numUe", "Número de UEs", numUe);
+  cmd.AddValue ("stopMs", "Duración de la simulación en ms", stopMs);
+  cmd.AddValue ("report", "Habilitar reporte CSV", reportEnabled);
+  cmd.AddValue ("reportPrefix", "Prefijo de archivos de reporte", reportPrefix);
+  cmd.AddValue ("reportDir", "Directorio base para reportes (se crea subcarpeta por corrida)", reportDir);
+  cmd.AddValue ("reportRunId", "Nombre de la subcarpeta de corrida (si vacío se autogenera)", reportRunId);
+  cmd.Parse (argc, argv);
 
   // ---------- Reproducibilidad ----------
   GlobalValue::Bind ("RngSeed", UintegerValue (12345));
@@ -98,7 +116,40 @@ int main (int argc, char *argv[])
 
   // ---------- Simulación corta: suficiente para NPRACH + RAR ----------
   Simulator::Stop (MilliSeconds (stopMs));
+  if (reportEnabled)
+    {
+      std::string finalPrefix = reportPrefix;
+      if (!reportDir.empty () || !reportRunId.empty ())
+        {
+          if (reportDir.empty ())
+            {
+              reportDir = ".";
+            }
+          if (reportRunId.empty ())
+            {
+              std::time_t now = std::time (0);
+              std::tm *lt = std::localtime (&now);
+              char buf[32];
+              std::strftime (buf, sizeof (buf), "run_%Y%m%d_%H%M%S", lt);
+              reportRunId = std::string (buf);
+            }
+          std::string runDir = ns3::SystemPath::Append (reportDir, reportRunId);
+          ns3::SystemPath::MakeDirectories (runDir);
+          std::string baseName = reportPrefix;
+          std::list<std::string> parts = ns3::SystemPath::Split (reportPrefix);
+          if (!parts.empty ())
+            {
+              baseName = parts.back ();
+            }
+          finalPrefix = ns3::SystemPath::Append (runDir, baseName);
+        }
+      SaraReport::Enable (finalPrefix);
+    }
   Simulator::Run ();
+  if (reportEnabled)
+    {
+      SaraReport::Finalize ();
+    }
   Simulator::Destroy ();
   return 0;
 }

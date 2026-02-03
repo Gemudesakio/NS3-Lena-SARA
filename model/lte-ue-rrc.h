@@ -778,6 +778,11 @@ private:
    * \param nonCec LteRrcSap::NonCriticalExtensionConfiguration
    */
   void ApplyRadioResourceConfigDedicatedSecondaryCarrier (LteRrcSap::NonCriticalExtensionConfiguration nonCec);
+  /**
+   * Apply definitive RNTI assigned by the eNB (SARA).
+   * \param rntiDef definitive RNTI
+   */
+  void ApplyAssignedRnti (uint16_t rntiDef);
   /// Start connection function
   void StartConnection ();
   /// Start connection function

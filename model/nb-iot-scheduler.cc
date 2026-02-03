@@ -676,7 +676,15 @@ NbiotScheduler::ScheduleSearchSpace (SearchSpaceConfig ssc)
               if (ScheduleNpdcchMessage (dci_candidate, ssc))
                 {
                   scheduledMessages.push_back (dci_candidate);
-                  m_rntiUeConfigMap[(*it)].rlcDlBuffer = 0;
+                  uint64_t bytesTx = dci_candidate.tbs / 8;
+                  if (bytesTx >= m_rntiUeConfigMap[(*it)].rlcDlBuffer)
+                    {
+                      m_rntiUeConfigMap[(*it)].rlcDlBuffer = 0;
+                    }
+                  else
+                    {
+                      m_rntiUeConfigMap[(*it)].rlcDlBuffer -= bytesTx;
+                    }
                   m_RoundRobinLastScheduled[ssc] = (*it);
                   m_rntiUeConfigMap[(*it)].priority = UeConfig::SchedulePriority::UPLINK;
                 }
@@ -730,7 +738,15 @@ NbiotScheduler::ScheduleSearchSpace (SearchSpaceConfig ssc)
               if (ScheduleNpdcchMessage (dci_candidate, ssc))
                 {
                   scheduledMessages.push_back (dci_candidate);
-                  m_rntiUeConfigMap[(*it)].rlcDlBuffer = 0;
+                  uint64_t bytesTx = dci_candidate.tbs / 8;
+                  if (bytesTx >= m_rntiUeConfigMap[(*it)].rlcDlBuffer)
+                    {
+                      m_rntiUeConfigMap[(*it)].rlcDlBuffer = 0;
+                    }
+                  else
+                    {
+                      m_rntiUeConfigMap[(*it)].rlcDlBuffer -= bytesTx;
+                    }
                   m_RoundRobinLastScheduled[ssc] = (*it);
                 }
             }
@@ -1171,9 +1187,36 @@ NbiotScheduler::AddToUlBufferReq (uint64_t rnti, uint64_t dataSize)
                                                     m_searchSpaceRntiMap[searchSpace].end (), rnti);
     if (it == m_searchSpaceRntiMap[searchSpace].end ())
       {
-        m_searchSpaceRntiMap[searchSpace].push_back (rnti);
+      m_searchSpaceRntiMap[searchSpace].push_back (rnti);
       }
   }
+}
+
+void
+NbiotScheduler::CloneUeConfig (uint16_t srcRnti, uint16_t dstRnti)
+{
+  std::map<uint16_t, UeConfig>::const_iterator it = m_rntiUeConfigMap.find (srcRnti);
+  if (it == m_rntiUeConfigMap.end ())
+    {
+      return;
+    }
+
+  UeConfig cfg = it->second;
+  cfg.rnti = dstRnti;
+  cfg.rlcDlBuffer = 0;
+  cfg.rlcUlBuffer = 0;
+  cfg.lastUl = 0;
+  cfg.lastDl = 0;
+  m_rntiUeConfigMap[dstRnti] = cfg;
+
+  SearchSpaceConfig searchSpace = cfg.searchSpaceConfig;
+  std::vector<uint16_t>::iterator sit =
+      std::find (m_searchSpaceRntiMap[searchSpace].begin (),
+                 m_searchSpaceRntiMap[searchSpace].end (), dstRnti);
+  if (sit == m_searchSpaceRntiMap[searchSpace].end ())
+    {
+      m_searchSpaceRntiMap[searchSpace].push_back (dstRnti);
+    }
 }
 
 SearchSpaceConfig
