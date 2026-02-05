@@ -44,6 +44,11 @@ static std::ofstream g_msg3Enb;
 static std::ofstream g_msg3Sep;
 static std::ofstream g_msg4Enb;
 static std::ofstream g_msg4Ue;
+static std::ofstream g_msg4AirEnb;
+static std::ofstream g_msg4RxUe;
+static std::ofstream g_msg4PhyUe;
+static std::ofstream g_dciNbUe;
+static std::ofstream g_expectedTbUe;
 static std::ofstream g_msg5Tx;
 static std::ofstream g_msg5Enb;
 static std::ofstream g_transition;
@@ -66,6 +71,23 @@ SaraReport::IsEnabled ()
   return g_enabled;
 }
 
+uint32_t
+SaraReport::GetMsg4UeAcceptedCount ()
+{
+  return static_cast<uint32_t> (g_msg4Events.size ());
+}
+
+uint32_t
+SaraReport::GetMsg4UeAcceptedUniqueCount ()
+{
+  std::set<uint64_t> imsis;
+  for (const Msg4Event &e : g_msg4Events)
+    {
+      imsis.insert (e.imsi);
+    }
+  return static_cast<uint32_t> (imsis.size ());
+}
+
 void
 SaraReport::Enable (const std::string &prefix)
 {
@@ -83,6 +105,11 @@ SaraReport::Enable (const std::string &prefix)
   g_msg3Sep.open ((g_prefix + "_msg3_sep.csv").c_str ());
   g_msg4Enb.open ((g_prefix + "_msg4_enb.csv").c_str ());
   g_msg4Ue.open ((g_prefix + "_msg4_ue.csv").c_str ());
+  g_msg4AirEnb.open ((g_prefix + "_msg4_air_enb.csv").c_str ());
+  g_msg4RxUe.open ((g_prefix + "_msg4_rx_ue.csv").c_str ());
+  g_msg4PhyUe.open ((g_prefix + "_msg4_phy_ue.csv").c_str ());
+  g_dciNbUe.open ((g_prefix + "_dci_nb_ue.csv").c_str ());
+  g_expectedTbUe.open ((g_prefix + "_expected_tb_ue.csv").c_str ());
   g_msg5Tx.open ((g_prefix + "_msg5_tx.csv").c_str ());
   g_msg5Enb.open ((g_prefix + "_msg5_enb.csv").c_str ());
   g_transition.open ((g_prefix + "_transition.csv").c_str ());
@@ -95,9 +122,14 @@ SaraReport::Enable (const std::string &prefix)
   g_msg3Sep << "time_s,tc_rnti,codebook,accepted\n";
   g_msg4Enb << "time_s,tc_rnti,imsi,c_rnti,sara\n";
   g_msg4Ue << "time_s,node,imsi,tc_rnti,c_rnti,sara\n";
+  g_msg4AirEnb << "time_s,tc_rnti,imsi,c_rnti,sara,bytes\n";
+  g_msg4RxUe << "time_s,node,ue_imsi,ue_state,tc_rnti,msg_imsi,c_rnti,decision,drop_reason\n";
+  g_msg4PhyUe << "time_s,node,tc_rnti,lcid,pkt_uid,msg_imsi,c_rnti,event\n";
+  g_dciNbUe << "time_s,node,rnti,curr_sf,npdsch_first,npdsch_last,wait_ms\n";
+  g_expectedTbUe << "time_s,node,rnti\n";
   g_msg5Tx << "time_s,node,imsi,c_rnti\n";
   g_msg5Enb << "time_s,imsi,c_rnti\n";
-  g_transition << "imsi,node,tc_rnti,c_rnti,msg4_time_s\n";
+  g_transition << "imsi,node,tc_rnti,c_rnti,msg4_time_s,latencia_real_s,latencia_instantanea_s\n";
   g_summary << "metric,value\n";
 
   g_msg1 << std::fixed << std::setprecision (6);
@@ -107,6 +139,11 @@ SaraReport::Enable (const std::string &prefix)
   g_msg3Sep << std::fixed << std::setprecision (6);
   g_msg4Enb << std::fixed << std::setprecision (6);
   g_msg4Ue << std::fixed << std::setprecision (6);
+  g_msg4AirEnb << std::fixed << std::setprecision (6);
+  g_msg4RxUe << std::fixed << std::setprecision (6);
+  g_msg4PhyUe << std::fixed << std::setprecision (6);
+  g_dciNbUe << std::fixed << std::setprecision (6);
+  g_expectedTbUe << std::fixed << std::setprecision (6);
   g_msg5Tx << std::fixed << std::setprecision (6);
   g_msg5Enb << std::fixed << std::setprecision (6);
   g_transition << std::fixed << std::setprecision (6);
@@ -202,6 +239,64 @@ SaraReport::LogMsg4Ue (uint32_t nodeId, uint64_t imsi, uint16_t tcRnti, uint16_t
 }
 
 void
+SaraReport::LogMsg4AirEnb (uint16_t tcRnti, uint64_t imsi, uint16_t cRnti, bool sara, uint32_t bytes)
+{
+  if (!g_enabled)
+    {
+      return;
+    }
+  g_msg4AirEnb << Now () << "," << tcRnti << "," << imsi << "," << cRnti << ","
+               << (sara ? 1 : 0) << "," << bytes << "\n";
+}
+
+void
+SaraReport::LogMsg4RxUe (uint32_t nodeId, uint64_t ueImsi, uint16_t ueState, uint16_t tcRnti,
+                         uint64_t msgImsi, uint16_t cRnti, uint8_t decision, uint8_t dropReason)
+{
+  if (!g_enabled)
+    {
+      return;
+    }
+  g_msg4RxUe << Now () << "," << nodeId << "," << ueImsi << "," << ueState << ","
+             << tcRnti << "," << msgImsi << "," << cRnti << ","
+             << static_cast<uint32_t> (decision) << "," << static_cast<uint32_t> (dropReason) << "\n";
+}
+
+void
+SaraReport::LogMsg4PhyUe (uint32_t nodeId, uint16_t tcRnti, uint8_t lcid, uint32_t pktUid,
+                          uint64_t msgImsi, uint16_t cRnti, uint8_t event)
+{
+  if (!g_enabled)
+    {
+      return;
+    }
+  g_msg4PhyUe << Now () << "," << nodeId << "," << tcRnti << "," << (uint32_t) lcid << ","
+              << pktUid << "," << msgImsi << "," << cRnti << "," << (uint32_t) event << "\n";
+}
+
+void
+SaraReport::LogDlDciNbUe (uint32_t nodeId, uint16_t rnti, uint64_t currSf, uint64_t npdschFirst,
+                          uint64_t npdschLast, uint64_t waitMs)
+{
+  if (!g_enabled)
+    {
+      return;
+    }
+  g_dciNbUe << Now () << "," << nodeId << "," << rnti << "," << currSf << ","
+            << npdschFirst << "," << npdschLast << "," << waitMs << "\n";
+}
+
+void
+SaraReport::LogExpectedTbAddUe (uint32_t nodeId, uint16_t rnti)
+{
+  if (!g_enabled)
+    {
+      return;
+    }
+  g_expectedTbUe << Now () << "," << nodeId << "," << rnti << "\n";
+}
+
+void
 SaraReport::LogMsg5Tx (uint32_t nodeId, uint64_t imsi, uint16_t cRnti)
 {
   if (!g_enabled)
@@ -256,8 +351,28 @@ SaraReport::Finalize ()
         {
           nodeId = nIt->second;
         }
+      double latencyReal = 0.0;
+      double latencyInstant = 0.0;
+      std::vector<Msg1Event> &v1 = msg1ByImsi[e.imsi];
+      if (!v1.empty ())
+        {
+          std::sort (v1.begin (), v1.end (),
+                     [] (const Msg1Event &a, const Msg1Event &b) { return a.t < b.t; });
+          Msg1Event first = v1.front ();
+          Msg1Event lastBefore = v1.front ();
+          for (const Msg1Event &m1 : v1)
+            {
+              if (m1.t <= e.t)
+                {
+                  lastBefore = m1;
+                }
+            }
+          latencyReal = e.t - first.t;
+          latencyInstant = e.t - lastBefore.t;
+        }
       g_transition << e.imsi << "," << nodeId << "," << e.tcRnti << ","
-                   << e.cRnti << "," << e.t << "\n";
+                   << e.cRnti << "," << e.t << "," << latencyReal << ","
+                   << latencyInstant << "\n";
     }
 
   const uint32_t totalAttempts = static_cast<uint32_t> (g_msg1Events.size ());
@@ -283,11 +398,10 @@ SaraReport::Finalize ()
     }
 
   // Latency + first attempt success
-  double sumLatency = 0.0;
-  double sumLatencyFirst = 0.0;
+  double sumLatencyInstant = 0.0;
+  double sumLatencyReal = 0.0;
   uint32_t successCount = 0;
   uint32_t firstAttemptSuccess = 0;
-  uint32_t firstAttemptLatencyCount = 0;
   std::map<uint16_t, uint32_t> raRntiSuccessCount;
 
   for (std::map<uint64_t, std::vector<Msg4Event> >::iterator it = msg4ByImsi.begin ();
@@ -318,26 +432,22 @@ SaraReport::Finalize ()
             }
         }
 
-      sumLatency += (t4 - chosen.t);
+      sumLatencyInstant += (t4 - chosen.t);
+      sumLatencyReal += (t4 - v1.front ().t);
       ++successCount;
       if (attemptsBefore <= 1)
         {
           ++firstAttemptSuccess;
-          sumLatencyFirst += (t4 - chosen.t);
-          ++firstAttemptLatencyCount;
         }
       raRntiSuccessCount[chosen.raRnti]++;
     }
 
-  double avgLatency = 0.0;
+  double avgLatencyInstant = 0.0;
+  double avgLatencyReal = 0.0;
   if (successCount > 0)
     {
-      avgLatency = sumLatency / successCount;
-    }
-  double avgLatencyFirst = 0.0;
-  if (firstAttemptLatencyCount > 0)
-    {
-      avgLatencyFirst = sumLatencyFirst / firstAttemptLatencyCount;
+      avgLatencyInstant = sumLatencyInstant / successCount;
+      avgLatencyReal = sumLatencyReal / successCount;
     }
 
   double accessEfficiency = 0.0;
@@ -377,8 +487,8 @@ SaraReport::Finalize ()
   g_summary << "eficiencia_acceso," << accessEfficiency << "\n";
   g_summary << "probabilidad_exito," << successProbability << "\n";
   g_summary << "tasa_exito_primer_intento," << firstAttemptRate << "\n";
-  g_summary << "latencia_acceso_promedio_total_s," << avgLatency << "\n";
-  g_summary << "latencia_acceso_promedio_primer_intento_s," << avgLatencyFirst << "\n";
+  g_summary << "latencia_acceso_promedio_real_s," << avgLatencyReal << "\n";
+  g_summary << "latencia_acceso_promedio_instantanea_s," << avgLatencyInstant << "\n";
   g_summary << "tasa_colision_preambulo," << collisionRate << "\n";
   g_summary << "preambulos_colisionados," << collidingPreambles << "\n";
   g_summary << "ues_colisionados," << collidingUes << "\n";
@@ -391,6 +501,11 @@ SaraReport::Finalize ()
   g_msg3Sep.close ();
   g_msg4Enb.close ();
   g_msg4Ue.close ();
+  g_msg4AirEnb.close ();
+  g_msg4RxUe.close ();
+  g_msg4PhyUe.close ();
+  g_dciNbUe.close ();
+  g_expectedTbUe.close ();
   g_msg5Tx.close ();
   g_msg5Enb.close ();
   g_transition.close ();

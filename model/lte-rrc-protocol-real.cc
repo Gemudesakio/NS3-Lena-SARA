@@ -472,18 +472,41 @@ LteUeRrcProtocolReal::DoReceivePdcpPdu (Ptr<Packet> p)
       // RrcConnectionSetup
       p->RemoveHeader (rrcConnectionSetupHeader);
       rrcConnectionSetupMsg = rrcConnectionSetupHeader.GetMessage ();
-      if (m_rrc && (m_rrc->GetState () != LteUeRrc::IDLE_CONNECTING))
-        {
-          NS_LOG_INFO ("Dropping Msg4 in state " << (uint16_t) m_rrc->GetState ());
-          break;
-        }
-      if ((rrcConnectionSetupMsg.ueIdentity != 0) && m_rrc
-          && (rrcConnectionSetupMsg.ueIdentity != m_rrc->GetImsi ()))
-        {
-          NS_LOG_INFO ("Dropping Msg4 for IMSI " << rrcConnectionSetupMsg.ueIdentity
-                       << " at UE IMSI " << m_rrc->GetImsi ());
-          break;
-        }
+      {
+        // Decide whether to accept or drop (SARA: accept only if IMSI matches).
+        uint8_t decision = 1;
+        uint8_t dropReason = 0;
+        uint64_t ueImsi = m_rrc ? m_rrc->GetImsi () : 0;
+        uint16_t ueState = m_rrc ? static_cast<uint16_t> (m_rrc->GetState ()) : 0;
+        uint16_t tcRnti = m_rrc ? m_rrc->GetRnti () : 0;
+        uint16_t cRnti = (rrcConnectionSetupMsg.assignedRnti != 0) ? rrcConnectionSetupMsg.assignedRnti : tcRnti;
+
+        if (m_rrc && (m_rrc->GetState () != LteUeRrc::IDLE_CONNECTING))
+          {
+            decision = 0;
+            dropReason = 1; // state_mismatch
+            NS_LOG_INFO ("Dropping Msg4 in state " << (uint16_t) m_rrc->GetState ());
+          }
+        else if ((rrcConnectionSetupMsg.ueIdentity != 0) && m_rrc
+                 && (rrcConnectionSetupMsg.ueIdentity != m_rrc->GetImsi ()))
+          {
+            decision = 0;
+            dropReason = 2; // imsi_mismatch
+            NS_LOG_INFO ("Dropping Msg4 for IMSI " << rrcConnectionSetupMsg.ueIdentity
+                         << " at UE IMSI " << m_rrc->GetImsi ());
+          }
+
+        if (SaraReport::IsEnabled ())
+          {
+            SaraReport::LogMsg4RxUe (Simulator::GetContext (), ueImsi, ueState, tcRnti,
+                                     rrcConnectionSetupMsg.ueIdentity, cRnti, decision, dropReason);
+          }
+
+        if (decision == 0)
+          {
+            break;
+          }
+      }
       m_ueRrcSapProvider->RecvRrcConnectionSetup (rrcConnectionSetupMsg);
       break;
     case 4:

@@ -38,6 +38,7 @@
 #include "lte-ue-net-device.h"
 #include "lte-enb-net-device.h"
 #include "lte-spectrum-value-helper.h"
+#include "sara-report.h"
 #include "lte-amc.h"
 #include "lte-ue-mac.h"
 #include "ff-mac-common.h"
@@ -1250,11 +1251,25 @@ LteUePhy::ReceiveLteControlMessageList (std::list<Ptr<LteControlMessage> > msgLi
           
           int currentsubframe =  10*(m_frameNo-1)+(m_subframeNo-1);
           int subframes_to_wait = *(dci.npdschOpportunity.end()-1)-currentsubframe;
+          if (subframes_to_wait < 0)
+            {
+              subframes_to_wait = 0;
+            }
+          Time expiry = Simulator::Now () + MilliSeconds (subframes_to_wait + 1);
+          if (SaraReport::IsEnabled ())
+            {
+              const uint64_t npdschFirst = dci.npdschOpportunity.empty () ? 0 : dci.npdschOpportunity.front ();
+              const uint64_t npdschLast = dci.npdschOpportunity.empty () ? 0 : dci.npdschOpportunity.back ();
+              SaraReport::LogDlDciNbUe (Simulator::GetContext (), m_rnti,
+                                       static_cast<uint64_t> (currentsubframe),
+                                       npdschFirst, npdschLast,
+                                       static_cast<uint64_t> (subframes_to_wait));
+            }
           m_uePhySapUser->NotifyAboutHarqOpportunity(dci.npuschOpportunity);
           //m_downlinkSpectrumPhy->AddExpectedTb (msg2->GetRnti(),dci.NDI, 192, 0, std::vector<int>({0}), 0, 0, 0, true /* DL */);
           //AddNbiotExpectedTb(msg2->GetRnti(),dci.NDI, 192, 0, std::vector<int>({0}), 0, 0, 0, true /* DL */);
 
-          Simulator::Schedule (MilliSeconds(subframes_to_wait), &LteUePhy::AddNbiotExpectedTb, this);
+          Simulator::Schedule (MilliSeconds(subframes_to_wait), &LteUePhy::AddNbiotExpectedTb, this, expiry);
 //                                      (short unsigned int, unsigned char, short unsigned int, unsigned char, std::vector<int>, unsigned char, unsigned char, unsigned char, bool), 
  //                      ns3::LteUePhy*, unsigned int, bool&, int, int, std::vector<int>, int, int, int, bool)’
 //                       short unsigned int, unsigned char, short unsigned int, unsigned char, std::vector<int>, unsigned char, unsigned char, unsigned char, bool
@@ -1347,9 +1362,14 @@ LteUePhy::ReceiveLteControlMessageList (std::list<Ptr<LteControlMessage> > msgLi
 
 
 }
-void LteUePhy::AddNbiotExpectedTb(){
+void LteUePhy::AddNbiotExpectedTb(Time expiry){
           //m_downlinkSpectrumPhy->AddExpectedTb (rnti,ndi, size, mcs, map, layer, harqId, rv, downlink/* DL */);
+          if (SaraReport::IsEnabled ())
+            {
+              SaraReport::LogExpectedTbAddUe (Simulator::GetContext (), m_rnti);
+            }
           m_downlinkSpectrumPhy->AddExpectedTb (m_rnti,1, 192, 0, std::vector<int>{0}, 0, 1, 0, true/* DL */);
+          m_downlinkSpectrumPhy->SetExpectedTbExpiry (m_rnti, 0, expiry);
 }
 
 void LteUePhy::DoSendHarqResponse(bool ack){

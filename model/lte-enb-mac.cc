@@ -51,6 +51,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include "lte-rrc-header.h"
 #include "sara-ul-id-tag.h"    // (1) Tag con cd para Msg3 (dmrs ignorado)
 #include "sara-msg3-group-tag.h"   // Tag para agrupar Msg3 por ventana
 
@@ -501,6 +502,12 @@ LteEnbMac::DoDispose (void)
   NS_LOG_FUNCTION (this);
   NS_LOG_INFO ("[ENB][SUMMARY] MSG3 recibidos = " << m_msg3RxCount);
   NS_LOG_INFO ("[ENB][SUMMARY] MSG3 enviados = " << m_msg3AcceptedCount);
+  // "MSG4 recibidos correctamente" = Msg4 aceptado por el UE (registrado vía SaraReport::LogMsg4Ue).
+  const uint32_t msg4Ok = SaraReport::GetMsg4UeAcceptedUniqueCount ();
+  if (msg4Ok > 0)
+    {
+      NS_LOG_INFO ("[ENB][SUMMARY] MSG4 recibidos correctamente = " << msg4Ok);
+    }
  //limpia vartiables de estado
   m_dlCqiReceived.clear ();
   m_ulCqiReceived.clear ();
@@ -2037,6 +2044,23 @@ void
 LteEnbMac::DoTransmitPdu (LteMacSapProvider::TransmitPduParameters params)
 {
   NS_LOG_FUNCTION (this);
+
+  if (SaraReport::IsEnabled () && (params.lcid == 0))
+    {
+      // Log actual "on-air" Msg4: this point means it received a TX opportunity
+      // and is being handed to PHY. Decode a copy to extract IMSI/C-RNTI.
+      Ptr<Packet> copy = params.pdu->Copy ();
+      RrcDlCcchMessage dlMsg;
+      if ((copy->PeekHeader (dlMsg) != 0) && (dlMsg.GetMessageType () == 3))
+        {
+          RrcConnectionSetupHeader setupHdr;
+          copy->RemoveHeader (setupHdr);
+          LteRrcSap::RrcConnectionSetup msg = setupHdr.GetMessage ();
+          const bool sara = (msg.ueIdentity != 0) || (msg.assignedRnti != 0);
+          const uint16_t cRnti = (sara && (msg.assignedRnti != 0)) ? msg.assignedRnti : params.rnti;
+          SaraReport::LogMsg4AirEnb (params.rnti, msg.ueIdentity, cRnti, sara, params.pdu->GetSize ());
+        }
+    }
 
   // Peek RLC Header to issue StatusPDU scheduling if needed
 

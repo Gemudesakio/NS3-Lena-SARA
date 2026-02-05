@@ -35,6 +35,7 @@
 #include <ns3/lte-amc.h>
 #include <ns3/lte-ue-phy-sap.h>
 #include <ns3/lte-ue-cphy-sap.h>
+#include <ns3/nstime.h>
 #include <ns3/ptr.h>
 #include <ns3/lte-amc.h>
 #include <set>
@@ -678,7 +679,7 @@ private:
 
   virtual void DoSendHarqResponse(bool ack);
 
-  void AddNbiotExpectedTb();
+  void AddNbiotExpectedTb(Time expiry);
   /// A list of sub channels to use in TX.
   std::vector <int> m_subChannelsForTransmission;
   /// A list of sub channels to use in RX.
