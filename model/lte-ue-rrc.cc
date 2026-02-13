@@ -1344,6 +1344,9 @@ LteUeRrc::DoRecvRrcConnectionSetup (LteRrcSap::RrcConnectionSetup msg)
     {
     case IDLE_CONNECTING:
       {
+        NS_LOG_INFO ("[UE][MSG4][RX] imsi=" << m_imsi
+                    << " c-rnti=" << m_rnti
+                    << " cellId=" << m_cellId);
         ApplyRadioResourceConfigDedicated (msg.radioResourceConfigDedicated);
         m_connEstFailCount = 0;
         m_connectionTimeout.Cancel ();
@@ -1352,6 +1355,9 @@ LteUeRrc::DoRecvRrcConnectionSetup (LteRrcSap::RrcConnectionSetup msg)
         LteRrcSap::RrcConnectionSetupCompleted msg2;
         msg2.rrcTransactionIdentifier = msg.rrcTransactionIdentifier;
         m_rrcSapUser->SendRrcConnectionSetupCompleted (msg2);
+        NS_LOG_INFO ("[UE][MSG4][COMPLETE] imsi=" << m_imsi
+                    << " c-rnti=" << m_rnti
+                    << " t=" << Simulator::Now ().GetSeconds () << "s");
         m_asSapUser->NotifyConnectionSuccessful ();
         m_cmacSapProvider.at (0)->NotifyConnectionSuccessful ();
         //NS_BUILD_DEBUG(std::cout << "CONNECTION COMPLETE" << std::endl);
@@ -3952,4 +3958,3 @@ void LteUeRrc::EnableLogging(){
 }
 
 } // namespace ns3
-

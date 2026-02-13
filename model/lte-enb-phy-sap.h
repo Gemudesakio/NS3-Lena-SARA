@@ -112,7 +112,8 @@ public:
    * 
    * \param prachId the ID of the preamble
    */
-  virtual void ReceiveNprachPreamble (uint32_t prachId, uint8_t subcarrierOffset, uint32_t ranti) = 0;
+  virtual void ReceiveNprachPreamble (uint32_t prachId, uint8_t subcarrierOffset, uint32_t ranti,
+                                      uint32_t senderMetaId) = 0;
 
   /**
    * \brief Returns to MAC level the UL-CQI evaluated

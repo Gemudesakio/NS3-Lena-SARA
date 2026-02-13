@@ -544,7 +544,10 @@ LteEnbPhy::ReceiveLteControlMessageList (std::list<Ptr<LteControlMessage> > msgL
         case LteControlMessage::NPRACH_PREAMBLE:
           {
             Ptr<NprachPreambleNbiotControlMessage> nprachPreamble = DynamicCast<NprachPreambleNbiotControlMessage> (*it);
-            m_enbPhySapUser->ReceiveNprachPreamble (nprachPreamble->GetRapId(), nprachPreamble->GetSubcarrierOffset(), nprachPreamble->GetRanti());
+            m_enbPhySapUser->ReceiveNprachPreamble (nprachPreamble->GetRapId (),
+                                                    nprachPreamble->GetSubcarrierOffset (),
+                                                    nprachPreamble->GetRanti (),
+                                                    nprachPreamble->GetSenderMetaId ());
             
           }
           break;

@@ -518,7 +518,8 @@ private:
   * \brief Receive RACH Preamble function
   * \param prachId PRACH ID number
   */
-  void DoReceiveNprachPreamble (uint8_t prachId, uint8_t subcarrierOffset, uint32_t ranti);
+  void DoReceiveNprachPreamble (uint8_t prachId, uint8_t subcarrierOffset, uint32_t ranti,
+                                uint32_t senderMetaId);
   void DoUlCqiReportNb (std::vector<double> cqi);
 
   void DoNotifyConnectionSuccessful(uint16_t rnti);
@@ -567,13 +568,51 @@ private:
   std::string m_logdir;
 
   /*
-  * --- SARA: detector y parámetros (desactivado por defecto) ---
+  * --- Nuevo esquema SCMA (activación y parámetros base) ---
   */
-  bool m_saraActivated;                 // OFF por defecto
-  double m_saraTpr;                     // True Positive rate (p.ej. 0.975)
-  double m_saraFpr;                     // False Positive rate (p.ej. 0.001)
-  uint8_t m_saraMaxGroupSize;           // Tamaño de grupo (primer hito: 2)
-  Ptr<UniformRandomVariable> m_saraRng; // RNG local para el detector
+  bool m_newSchemaActivated;            // OFF por defecto: mantiene flujo legacy
+  uint8_t m_numScmaCodebooks;           // cantidad de codebooks por subportadora
+  uint16_t m_toaNumBins;                // cuantización ToA (solo lógica local)
+  uint16_t m_toaToleranceBins;          // tolerancia de matching ToA
+  uint64_t m_msg1RxCount;               // total Msg1 recibidos en eNB
+  uint64_t m_msg2TxCount;               // total RAR (Msg2) transmitidos por eNB
+  uint64_t m_msg3RxCount;               // total Msg3 aceptados en eNB
+  uint64_t m_msg3DropCount;             // total Msg3 descartados en eNB
+  uint64_t m_collisionRapidCount;       // total ocasiones con RAPID colisionado
+  uint64_t m_collisionUeCount;          // suma de UEs detectados en RAPIDs colisionados
+
+  /*
+  * --- Detector de colisiones (matriz de confusión), independiente del esquema ---
+  */
+  double m_scmaTpr;                     // True Positive rate (p.ej. 0.975)
+  double m_scmaFpr;                     // False Positive rate (p.ej. 0.001)
+  uint8_t m_scmaMaxGroupSize;           // tamaño máximo de grupo (hito actual: 2)
+  Ptr<UniformRandomVariable> m_scmaRng; // RNG local para el detector
+
+  struct NprachRxMeta
+  {
+    uint16_t rapid;
+    uint32_t ranti;
+    uint32_t senderMetaId;
+    uint16_t toaBin;
+    uint8_t subcarrierOffset;
+  };
+
+  struct ScmaMsg3ExpectedContext
+  {
+    uint16_t tcRnti;
+    uint16_t virtualId;
+    uint8_t codebookId;
+    uint8_t physicalCarrier;
+    uint8_t rapid;
+    bool toaValid;
+    uint16_t toaBin;
+  };
+
+  std::map<uint16_t, std::vector<NprachRxMeta>> m_nprachRxMetaByRapid;
+  std::map<uint16_t, ScmaMsg3ExpectedContext> m_expectedScmaMsg3ByTcRnti;
+  uint16_t EstimateToaBinFromSender (uint32_t senderMetaId) const;
+  std::vector<NprachRxMeta> SelectCollisionCandidates (uint16_t rapid, uint8_t maxCandidates) const;
   };
 
 } // end namespace ns3

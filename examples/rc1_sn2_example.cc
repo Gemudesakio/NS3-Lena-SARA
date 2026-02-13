@@ -23,24 +23,40 @@ int main (int argc, char *argv[])
   double   cellRadius = 200.0;
   uint32_t stopMs     = 2000;   // parar pronto: ver RAR y cortar antes de líos de Msg3
   bool     useNbSuspend = false; // usa AttachSuspendedNb (también sirve Attach normal)
+  bool     newSchema = true;
+  bool     dropCollision = false;
+  uint32_t rngRun = 1;
+
+  CommandLine cmd (__FILE__);
+  cmd.AddValue ("numUe", "Numero de UEs en la rafaga de acceso", numUe);
+  cmd.AddValue ("stopMs", "Tiempo total de simulacion en ms", stopMs);
+  cmd.AddValue ("newSchema", "Activa/desactiva el nuevo esquema SCMA", newSchema);
+  cmd.AddValue ("dropCollision", "Descartar colisiones (legacy estricto)", dropCollision);
+  cmd.AddValue ("rngRun", "RngRun para reproducibilidad/variacion", rngRun);
+  cmd.Parse (argc, argv);
 
   // ---------- Reproducibilidad ----------
   GlobalValue::Bind ("RngSeed", UintegerValue (12345));
-  GlobalValue::Bind ("RngRun",  UintegerValue (1));
+  GlobalValue::Bind ("RngRun",  UintegerValue (rngRun));
 
-  // ---------- SARA ON + “detección perfecta” para test ----------
-  Config::SetDefault ("ns3::LteEnbMac::SaraActivated",    BooleanValue (true));
-  Config::SetDefault ("ns3::LteEnbMac::SaraTpr",          DoubleValue (1.0)); // detecta siempre colisión real
-  Config::SetDefault ("ns3::LteEnbMac::SaraFpr",          DoubleValue (0.0)); // sin falsos positivos (para este smoke)
-  Config::SetDefault ("ns3::LteEnbMac::SaraMaxGroupSize", UintegerValue (2));
+  // ---------- Nuevo esquema ON + “detección perfecta” para test ----------
+  Config::SetDefault ("ns3::LteEnbMac::NewSchemaActivated", BooleanValue (newSchema));
+  Config::SetDefault ("ns3::LteEnbMac::ScmaTpr",            DoubleValue (1.0)); // detecta siempre colisión real
+  Config::SetDefault ("ns3::LteEnbMac::ScmaFpr",            DoubleValue (0.0)); // sin falsos positivos (para este smoke)
+  Config::SetDefault ("ns3::LteEnbMac::ScmaMaxGroupSize",   UintegerValue (2));
+  Config::SetDefault ("ns3::LteUeMac::NewSchemaActivated",  BooleanValue (newSchema));
+  Config::SetDefault ("ns3::LteUeMac::ToaNumBins",          UintegerValue (64));
+  Config::SetDefault ("ns3::LteUeMac::ToaToleranceBins",    UintegerValue (1));
 
-  // IMPORTANTE: no descartar colisiones (flujo legacy OFF).
+  // IMPORTANTE: no descartar colisiones.
   // Si NO tienes atributo expuesto, pon m_dropPreambleCollision=false en el ctor para esta prueba.
-  Config::SetDefault ("ns3::LteEnbMac::DropPreambleCollision", BooleanValue (false));
+  Config::SetDefault ("ns3::LteEnbMac::DropPreambleCollision", BooleanValue (dropCollision));
 
   // ---------- Logs útiles ----------
   LogComponentEnable ("LteEnbMac", LOG_LEVEL_INFO);
   LogComponentEnable ("LteUeMac",  LOG_LEVEL_INFO);
+  LogComponentEnable ("LteEnbRrc", LOG_LEVEL_INFO);
+  LogComponentEnable ("LteUeRrc",  LOG_LEVEL_INFO);
   // si quieres más detalle:
   // LogComponentEnable ("LteEnbRrc", LOG_LEVEL_INFO);
   // LogComponentEnable ("LteUeRrc",  LOG_LEVEL_INFO);

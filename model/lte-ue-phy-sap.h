@@ -82,6 +82,18 @@ public:
   
   virtual void SendHarqAckResponse(bool ack) = 0;
 
+  /**
+   * \brief Schedule UL resources for Msg3 after RAR acceptance.
+   *
+   * The UE MAC is the owner of RAR acceptance decision in NB-IoT.
+   * Once a RAR is accepted, MAC notifies PHY with the physical subcarrier
+   * and delay (in subframes) to queue the UL transmission resources.
+   *
+   * \param subcarrier physical UL subcarrier index
+   * \param subframesDelay delay in subframes before queuing resources
+   */
+  virtual void ScheduleNprachMsg3Transmission (uint8_t subcarrier, uint32_t subframesDelay) = 0;
+
 };
 
 

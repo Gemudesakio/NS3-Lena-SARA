@@ -262,7 +262,7 @@ private:
   *
   * \param raResponse RA response received
   */
-  void RecvRaResponseNb (NbIotRrcSap::RarPayload raResponse);
+  void RecvRaResponseNb (NbIotRrcSap::Rar raResponse);
  /**
   * RA response timeout function
   *
@@ -327,7 +327,7 @@ private:
   std::vector < uint8_t > m_miUlHarqProcessesPacketTimer; ///< timer for packet life in the buffer
 
   uint16_t m_rnti; ///< RNTI
-  uint16_t m_imsi; ///< IMSI
+  uint64_t m_imsi; ///< IMSI
 
   bool m_rachConfigured; ///< is RACH configured?
   bool m_nprachConfigured; ///< is RACH configured?
@@ -357,6 +357,14 @@ private:
   bool m_psm;
   bool m_nextIsMsg5;
   bool m_edt;
+  bool m_newSchemaActivated; ///< if true, use ToA matching for RAR acceptance
+  uint16_t m_toaNumBins; ///< number of ToA quantization bins
+  uint16_t m_toaToleranceBins; ///< accepted distance for ToA match
+  bool m_pendingScmaMsg3Tag; ///< true if next Msg3 should carry SCMA context
+  uint16_t m_pendingScmaTcRnti; ///< accepted temp C-RNTI (Msg3 identity)
+  uint16_t m_pendingScmaVirtualId; ///< virtual carrier assigned in RAR
+  uint8_t m_pendingScmaCodebookId; ///< codebook assigned in RAR
+  uint8_t m_pendingScmaPhysicalCarrier; ///< physical UL carrier from RAR grant
   NbIotRrcSap::EdtTbsNb DoGetEdtTbsInfo(); // return EdtTbsInfo based on RSRP (Coverage level)
   uint32_t m_subframesInSearchSpace;
   std::vector<uint32_t> m_logging;

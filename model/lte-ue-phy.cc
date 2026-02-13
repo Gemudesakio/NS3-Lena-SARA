@@ -40,6 +40,7 @@
 #include "lte-spectrum-value-helper.h"
 #include "lte-amc.h"
 #include "lte-ue-mac.h"
+#include "nb-iot-toa-utils.h"
 #include "ff-mac-common.h"
 #include "lte-chunk-processor.h"
 #include <ns3/lte-common.h>
@@ -95,6 +96,7 @@ public:
   virtual void NotifyConnectionSuccessful ();
   virtual double GetRSRP();
   virtual void SendHarqAckResponse(bool ack);
+  virtual void ScheduleNprachMsg3Transmission (uint8_t subcarrier, uint32_t subframesDelay);
 
 private:
   LteUePhy* m_phy; ///< the Phy
@@ -139,6 +141,13 @@ double UeMemberLteUePhySapProvider::GetRSRP()
 
 void UeMemberLteUePhySapProvider::SendHarqAckResponse(bool ack){
   m_phy->DoSendHarqResponse(ack);
+}
+
+void
+UeMemberLteUePhySapProvider::ScheduleNprachMsg3Transmission (uint8_t subcarrier,
+                                                             uint32_t subframesDelay)
+{
+  m_phy->DoScheduleNprachMsg3Transmission (subcarrier, subframesDelay);
 }
 
 ////////////////////////////////////////
@@ -1047,6 +1056,9 @@ LteUePhy::DoSendNprachPreamble (uint32_t raPreambleId, uint32_t raRnti, uint8_t 
    msg->SetRapId (raPreambleId);
    msg->SetSubcarrierOffset(subcarrieroffset);
    msg->SetRanti(raRnti);
+   // Internal simulation metadata used by eNB-side ToA abstraction.
+   const uint32_t senderMetaId = NbIotToaUtils::ToaMetaIdFromImsi (m_imsi);
+   msg->SetSenderMetaId (senderMetaId);
    m_raPreambleId = raPreambleId+subcarrieroffset;
    m_raRnti = raRnti;
    m_controlMessagesQueue.at (0).push_back (msg);
@@ -1269,47 +1281,9 @@ LteUePhy::ReceiveLteControlMessageList (std::list<Ptr<LteControlMessage> > msgLi
           Ptr<RarNbiotControlMessage> rarMsg = DynamicCast<RarNbiotControlMessage> (msg);
           if (rarMsg->GetRaRnti () == m_raRnti)
             {
-
-              for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin (); it != rarMsg->RarListEnd (); ++it)
-                {
-                  if (it->rapId != m_raPreambleId)
-                    {
-                      // UL grant not for me
-                      continue;
-                    }
-                  else
-                    {
-
-                      //NS_BUILD_DEBUG(std::cout << "Received My RAR at " << 10*(m_frameNo-1) +(m_subframeNo-1) << std::endl);
-                      NS_LOG_INFO ("received RAR RNTI " << m_raRnti);
-                      // set the uplink bandwidth according to the UL grant
-                      //std::vector <int> ulRb;
-                      //for (int i = 0; i < it->rarPayload.m_grant.m_rbLen; i++)
-                      //  {
-                      //    ulRb.push_back (i + it->rarPayload.m_grant.m_rbStart);
-                      //  }
-                      Ptr<DlCqiLteControlMessage> report = Create<DlCqiLteControlMessage>();
-                      CqiListElement_s dlcqi;
-
-                      dlcqi.m_rnti = it->rarPayload.cellRnti;
-                      dlcqi.m_ri = 1; // not yet used
-                      dlcqi.m_cqiType = CqiListElement_s::P10; // Peridic CQI using PUCCH wideband
-
-                      report->SetDlCqi (dlcqi);
-                      //std::cout << DoGetRSRP() << std::endl;
-                      report->rsrp = DoGetRSRP();
-                      DoSendLteControlMessage (report);
-                      //Simulator::Schedule() QueueSubChannelsForTransmission (std::vector<int>{0});
-                      // pass the info to the MACo
-                      int subframes = *(it->rarPayload.ulGrant.subframes.second.end()-1)-(10*(m_frameNo-1)+ m_subframeNo-1);
-                      int subcarrier =it->rarPayload.ulGrant.subframes.first;
-                      Simulator::Schedule (MilliSeconds(subframes), &LteUePhy::QueueSubChannelsForTransmission, this, std::vector<int>{subcarrier});
-                      m_uePhySapUser->ReceiveLteControlMessage (msg);
-                      // reset RACH variables with out of range values
-                      m_raPreambleId = 255;
-                      m_raRnti = 11;
-                    }
-                }
+              // Forward full RAR message to MAC. MAC performs final acceptance
+              // (RAPID + ToA) and then programs Msg3 UL resources via SAP.
+              m_uePhySapUser->ReceiveLteControlMessage (msg);
             }
         }
       else if (msg->GetMessageType () == LteControlMessage::UL_DCI_NB)
@@ -1350,6 +1324,16 @@ LteUePhy::ReceiveLteControlMessageList (std::list<Ptr<LteControlMessage> > msgLi
 void LteUePhy::AddNbiotExpectedTb(){
           //m_downlinkSpectrumPhy->AddExpectedTb (rnti,ndi, size, mcs, map, layer, harqId, rv, downlink/* DL */);
           m_downlinkSpectrumPhy->AddExpectedTb (m_rnti,1, 192, 0, std::vector<int>{0}, 0, 1, 0, true/* DL */);
+}
+
+void
+LteUePhy::DoScheduleNprachMsg3Transmission (uint8_t subcarrier, uint32_t subframesDelay)
+{
+  NS_LOG_FUNCTION (this << static_cast<uint32_t> (subcarrier) << subframesDelay);
+  Simulator::Schedule (MilliSeconds (subframesDelay),
+                       &LteUePhy::QueueSubChannelsForTransmission,
+                       this,
+                       std::vector<int>{static_cast<int> (subcarrier)});
 }
 
 void LteUePhy::DoSendHarqResponse(bool ack){

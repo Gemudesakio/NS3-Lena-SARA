@@ -361,6 +361,7 @@ NbIotRrcSap::SystemInformationBlockType1Nb Sib1NbiotControlMessage::GetSib1 () c
 NprachPreambleNbiotControlMessage::NprachPreambleNbiotControlMessage (void)
 {
   SetMessageType (LteControlMessage::NPRACH_PREAMBLE);
+  m_senderMetaId = 0;
 }
 
 void
@@ -391,10 +392,22 @@ NprachPreambleNbiotControlMessage::SetRanti(uint32_t ranti)
   m_ranti= ranti;
 }
 
+void
+NprachPreambleNbiotControlMessage::SetSenderMetaId (uint32_t senderMetaId)
+{
+  m_senderMetaId = senderMetaId;
+}
+
 uint32_t 
 NprachPreambleNbiotControlMessage::GetRanti() const
 {
   return m_ranti;
+}
+
+uint32_t
+NprachPreambleNbiotControlMessage::GetSenderMetaId () const
+{
+  return m_senderMetaId;
 }
 // ----------------------------------------------------------------------------------------------------------
 
@@ -554,4 +567,3 @@ int16_t DlHarqFeedbackNbiotControlMessage::GetRnti(void){
   return m_rnti;
 }
 } // namespace ns3
-

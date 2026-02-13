@@ -552,6 +552,7 @@ public:
   void SetRapId (uint8_t rapid);
   void SetSubcarrierOffset (uint8_t subcarrierOffset); // used so the eNB knows in which CE-Level the UE is
   void SetRanti (uint32_t ranti); // used so the eNB knows in which CE-Level the UE is
+  void SetSenderMetaId (uint32_t senderMetaId); // internal simulator metadata (not LTE identity)
   
   /** 
    * 
@@ -560,11 +561,13 @@ public:
   uint8_t GetRapId () const;
   uint8_t GetSubcarrierOffset () const;
   uint32_t GetRanti() const;
+  uint32_t GetSenderMetaId () const;
 
 private:
   uint8_t m_rapId; ///< the RAPID
   uint8_t m_subcarrierOffset;
   uint32_t m_ranti;
+  uint32_t m_senderMetaId;
 
 };
 

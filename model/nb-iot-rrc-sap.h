@@ -866,10 +866,12 @@ class NbIotRrcSap{
             NprachParametersNb::CoverageEnhancementLevel ceLevel;
             RarPayload rarPayload;
 
-            // --- SARA extensions (solo usados si SaraActivated == true en eNB) ---
-            bool     saraGroup     = false;  ///< true si pertenece a grupo SARA
-            uint8_t  saraGroupSize = 1;      ///< tamaño del grupo (1 = normal)
-            uint8_t  saraTag       = 0;      ///< opcional, útil para logs o depuración
+            // --- New schema extensions ---
+            // ToA does not travel in Msg1; this metadata is assigned by eNB-side logic.
+            bool     toaValid   = false;
+            uint16_t toaBin     = 0;
+            uint8_t  codebookId = 0;
+            uint16_t virtualId  = 0;
         };
 
 

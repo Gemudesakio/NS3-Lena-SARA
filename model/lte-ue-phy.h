@@ -678,6 +678,14 @@ private:
 
   virtual void DoSendHarqResponse(bool ack);
 
+  /**
+   * \brief Queue UL subchannel resources for Msg3 after MAC accepted the RAR.
+   *
+   * \param subcarrier physical subcarrier index
+   * \param subframesDelay delay in subframes before transmission
+   */
+  virtual void DoScheduleNprachMsg3Transmission (uint8_t subcarrier, uint32_t subframesDelay);
+
   void AddNbiotExpectedTb();
   /// A list of sub channels to use in TX.
   std::vector <int> m_subChannelsForTransmission;

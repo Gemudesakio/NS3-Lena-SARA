@@ -79,7 +79,10 @@ class NbiotScheduler : public Object
 {
 public:
 
-  NbiotScheduler(std::vector<NbIotRrcSap::NprachParametersNb> ces, NbIotRrcSap::SystemInformationBlockType2Nb sib2);
+  NbiotScheduler(std::vector<NbIotRrcSap::NprachParametersNb> ces,
+                 NbIotRrcSap::SystemInformationBlockType2Nb sib2,
+                 bool newSchemaActivated = false,
+                 uint8_t numScmaCodebooks = 6);
 
   //~NbiotScheduler();
 
@@ -105,9 +108,11 @@ void AddToUlBufferReq(uint64_t rnti, uint64_t dataSize);
 void SortBasedOnSelectedSchedulingAlgorithm(SearchSpaceConfig ssc);
 std::vector<uint64_t> GetNextAvailableSearchSpaceCandidate(uint32_t rnti, uint64_t SearchSpaceStartFrame, uint64_t SearchSpaceStartSubframe, uint64_t R_max, uint64_t R);
 std::vector<uint64_t> GetDlSubframeRangeWithoutSystemResources(uint64_t overallSubframeNo, uint64_t numSubframes);
-std::vector<uint64_t> GetUlSubframeRangeWithoutSystemResources(uint64_t overallSubframeNo, uint64_t numSubframes, uint64_t carrier);
+  std::vector<uint64_t> GetUlSubframeRangeWithoutSystemResources(uint64_t overallSubframeNo, uint64_t numSubframes, uint64_t carrier);
+  std::vector<uint64_t> GetUlSubframeRangeWithoutSystemResourcesVirtual(uint64_t overallSubframeNo, uint64_t numSubframes, uint64_t carrier);
 std::vector<uint64_t> CheckforNContiniousSubframesDl(std::vector<uint64_t> Subframes, uint64_t StartSubframe, uint64_t N);
-std::vector<uint64_t> CheckforNContiniousSubframesUl(std::vector<uint64_t> Subframes, uint64_t StartSubframe, uint64_t N, uint64_t carrier);
+  std::vector<uint64_t> CheckforNContiniousSubframesUl(std::vector<uint64_t> Subframes, uint64_t StartSubframe, uint64_t N, uint64_t carrier);
+  std::vector<uint64_t> CheckforNContiniousSubframesUlVirtual(std::vector<uint64_t> Subframes, uint64_t StartSubframe, uint64_t N, uint64_t carrier);
 std::vector<uint64_t> GetNextAvailableNpdschCandidate(uint64_t endSubframeDci, uint64_t minSchedulingDelay, uint64_t numSubframes, uint64_t R_max);
 std::vector<NbIotRrcSap::NpdcchMessage> Schedule(uint64_t frameNo, uint64_t subframeNo);
 std::vector<NbIotRrcSap::NpdcchMessage> ScheduleSearchSpace(SearchSpaceConfig ssc);
@@ -120,7 +125,13 @@ void RoundRobinScheduling(SearchSpaceConfig ssc);
 std::vector<int> m_downlink;
 void RemoveUe(uint16_t rnti);
 protected:
+  uint16_t GetMsg3VirtualCarrierCount() const;
+  uint16_t GetPhysicalCarrierFromVirtual(uint16_t virtualCarrier) const;
+  uint8_t GetCodebookFromVirtual(uint16_t virtualCarrier) const;
+  uint16_t GetVirtualCarrier(uint16_t physicalCarrier, uint8_t codebook) const;
+
   std::vector<std::vector<int>> m_uplink;
+  std::vector<std::vector<int>> m_msg3UplinkVirtual;
   std::vector<NbIotRrcSap::NpdcchMessage> m_rars_to_schedule;
   //std::vector<NbIotRrcSap::NpdcchMessage> m_NpdcchQueue;
   std::map<SearchSpaceConfig, std::vector<NbIotRrcSap::NpdcchMessage>> m_NpdcchQueue;
@@ -143,6 +154,9 @@ protected:
   std::map<uint16_t, UeConfig> m_rntiUeConfigMap;
   std::map<SearchSpaceConfig, std::vector<NbIotRrcSap::NpdcchMessage>> m_rarQueue;
   bool m_only15KhzSpacing = true;
+  bool m_newSchemaActivated;
+  uint8_t m_numScmaCodebooks;
+  uint16_t m_numPhysicalUlSubcarriers;
   uint64_t m_frameNo;
   uint64_t m_subframeNo;
   int m_currenthyperindex;
@@ -163,4 +177,3 @@ protected:
 }  // namespace ns3
 
 #endif /* FF_MAC_SCHEDULER_H */
-

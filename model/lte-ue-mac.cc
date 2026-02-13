@@ -28,18 +28,23 @@
 #include <ns3/packet.h>
 #include <ns3/packet-burst.h>
 #include <ns3/random-variable-stream.h>
+#include <ns3/boolean.h>
+#include <ns3/uinteger.h>
 #include <ns3/build-profile.h>
 
 #include "lte-ue-mac.h"
 #include "lte-ue-net-device.h"
 #include "lte-radio-bearer-tag.h"
+#include "nb-iot-toa-utils.h"
 #include "nb-iot-data-volume-and-power-headroom-tag.h"
 #include "nb-iot-buffer-status-report-tag.h"
+#include "nb-iot-scma-msg3-tag.h"
 #include <ns3/ff-mac-common.h>
 #include <ns3/lte-control-messages.h>
 #include <ns3/simulator.h>
 #include <ns3/lte-common.h>
 #include <fstream>
+#include <algorithm>
 
 namespace ns3 {
 
@@ -289,6 +294,21 @@ LteUeMac::GetTypeId (void)
           .SetParent<Object> ()
           .SetGroupName ("Lte")
           .AddConstructor<LteUeMac> ()
+          .AddAttribute ("NewSchemaActivated",
+                         "Enable ToA-based RAR matching for the new random-access schema.",
+                         BooleanValue (false),
+                         MakeBooleanAccessor (&LteUeMac::m_newSchemaActivated),
+                         MakeBooleanChecker ())
+          .AddAttribute ("ToaNumBins",
+                         "Number of quantization bins used for ToA matching.",
+                         UintegerValue (64),
+                         MakeUintegerAccessor (&LteUeMac::m_toaNumBins),
+                         MakeUintegerChecker<uint16_t> (2, 4096))
+          .AddAttribute ("ToaToleranceBins",
+                         "Tolerance in bins for ToA matching.",
+                         UintegerValue (1),
+                         MakeUintegerAccessor (&LteUeMac::m_toaToleranceBins),
+                         MakeUintegerChecker<uint16_t> (0, 64))
           .AddTraceSource ("RaResponseTimeout", "trace fired upon RA response timeout",
                            MakeTraceSourceAccessor (&LteUeMac::m_raResponseTimeoutTrace),
                            "ns3::LteUeMac::RaResponseTimeoutTracedCallback")
@@ -307,7 +327,15 @@ LteUeMac::LteUeMac ()
       m_rachConfigured (false),
       m_waitingForRaResponse (false),
       m_transmissionScheduled(false),
-      m_listenToSearchSpaces(false)
+      m_listenToSearchSpaces(false),
+      m_newSchemaActivated (false),
+      m_toaNumBins (64),
+      m_toaToleranceBins (1),
+      m_pendingScmaMsg3Tag (false),
+      m_pendingScmaTcRnti (0),
+      m_pendingScmaVirtualId (0),
+      m_pendingScmaCodebookId (0),
+      m_pendingScmaPhysicalCarrier (0)
 
 {
   NS_LOG_FUNCTION (this);
@@ -419,6 +447,28 @@ LteUeMac::DoTransmitPdu (LteMacSapProvider::TransmitPduParameters params)
     m_nextIsMsg5 = true;
     dprTag.SetDataVolumeValue(dataVolumeIndex);
     params.pdu->AddPacketTag(dprTag);
+
+    if (m_newSchemaActivated && m_pendingScmaMsg3Tag)
+      {
+        NbIotScmaMsg3Tag scmaMsg3Tag;
+        scmaMsg3Tag.SetTcRnti (m_pendingScmaTcRnti);
+        scmaMsg3Tag.SetVirtualId (m_pendingScmaVirtualId);
+        scmaMsg3Tag.SetCodebookId (m_pendingScmaCodebookId);
+        scmaMsg3Tag.SetPhysicalCarrier (m_pendingScmaPhysicalCarrier);
+        params.pdu->AddPacketTag (scmaMsg3Tag);
+        m_pendingScmaMsg3Tag = false;
+        NS_LOG_INFO ("[UE][MSG3][TX] imsi=" << m_imsi
+                    << " tc-rnti=" << m_pendingScmaTcRnti
+                    << " virtualId=" << m_pendingScmaVirtualId
+                    << " codebook=" << static_cast<uint32_t> (m_pendingScmaCodebookId)
+                    << " physicalCarrier=" << static_cast<uint32_t> (m_pendingScmaPhysicalCarrier));
+      }
+    else
+      {
+        NS_LOG_INFO ("[UE][MSG3][TX] imsi=" << m_imsi
+                    << " tc-rnti=" << params.rnti
+                    << " mode=legacy");
+      }
   }
   else{
 
@@ -609,8 +659,12 @@ LteUeMac::SendRaPreambleNb (bool contention)
   Simulator::Schedule (MilliSeconds (time), &LteUePhySapProvider::SendNprachPreamble,
                        m_uePhySapProvider, m_raPreambleId, m_raRnti,
                        NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel));
-  NS_LOG_INFO (this << " sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
-                    << (uint32_t) m_raRnti);
+  const uint16_t rapid =
+      static_cast<uint16_t> (NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) + m_raPreambleId);
+  NS_LOG_INFO ("[UE][MSG1][TX] imsi=" << m_imsi
+               << " preamble=" << static_cast<uint32_t> (m_raPreambleId)
+               << " rapid=" << rapid
+               << " ra-rnti=" << static_cast<uint32_t> (m_raRnti));
 
   if (m_mac_logging)
   {
@@ -702,22 +756,44 @@ LteUeMac::RecvRaResponse (BuildRarListElement_s raResponse)
 }
 
 void
-LteUeMac::RecvRaResponseNb (NbIotRrcSap::RarPayload raResponse)
+LteUeMac::RecvRaResponseNb (NbIotRrcSap::Rar raResponse)
 {
   NS_LOG_FUNCTION (this);
   m_waitingForRaResponse = false;
   m_noRaResponseReceivedEvent.Cancel ();
-  NS_LOG_INFO ("got RAR for RAPID " << (uint32_t) m_raPreambleId
-                                    << ", setting T-C-RNTI = " << raResponse.cellRnti);
+  NS_LOG_INFO ("[UE][MSG2][SELECT] imsi=" << m_imsi
+               << " preamble=" << static_cast<uint32_t> (m_raPreambleId)
+               << " tc-rnti=" << raResponse.rarPayload.cellRnti
+               << " toaValid=" << (raResponse.toaValid ? "1" : "0")
+               << " toaBin=" << static_cast<uint32_t> (raResponse.toaBin)
+               << " virtualId=" << static_cast<uint32_t> (raResponse.virtualId)
+               << " codebook=" << static_cast<uint32_t> (raResponse.codebookId)
+               << " physicalCarrier="
+               << static_cast<uint32_t> (raResponse.rarPayload.ulGrant.subframes.first));
                                     
   if (m_mac_logging)
   {
-    std::string msg = "RecvRaResponseNb,cellRNTI," + std::to_string(raResponse.cellRnti) + ",";
+    std::string msg = "RecvRaResponseNb,cellRNTI," + std::to_string(raResponse.rarPayload.cellRnti) + ",";
     LogMessage(msg);
   }
 
-  m_rnti = raResponse.cellRnti;
+  m_rnti = raResponse.rarPayload.cellRnti;
   m_cmacSapUser->SetTemporaryCellRnti (m_rnti);
+  if (m_newSchemaActivated)
+    {
+      m_pendingScmaMsg3Tag = true;
+      m_pendingScmaTcRnti = raResponse.rarPayload.cellRnti;
+      m_pendingScmaVirtualId = raResponse.virtualId;
+      m_pendingScmaCodebookId = raResponse.codebookId;
+      m_pendingScmaPhysicalCarrier = raResponse.rarPayload.ulGrant.subframes.first;
+    }
+  else
+    {
+      m_pendingScmaMsg3Tag = false;
+    }
+  // RAR accepted by MAC: clear RA identifiers used in this attempt.
+  m_raPreambleId = 255;
+  m_raRnti = 11;
   // in principle we should wait for contention resolution,
   // but in the current LTE model when two or more identical
   // preambles are sent no one is received, so there is no need
@@ -725,7 +801,7 @@ LteUeMac::RecvRaResponseNb (NbIotRrcSap::RarPayload raResponse)
 
   // To be comented in
   bool edt;
-  if(raResponse.ulGrant.tbs_size > 88){
+  if(raResponse.rarPayload.ulGrant.tbs_size > 88){
     // We got a grant for EDT 
     edt = true;
   }else{
@@ -753,16 +829,32 @@ LteUeMac::RecvRaResponseNb (NbIotRrcSap::RarPayload raResponse)
 
 
 
-      txOpParams.bytes = raResponse.ulGrant.tbs_size/8;
+      txOpParams.bytes = raResponse.rarPayload.ulGrant.tbs_size/8;
       txOpParams.layer = 0;
       txOpParams.harqId = 0;
       txOpParams.componentCarrierId = m_componentCarrierId;
       txOpParams.rnti = m_rnti;
       txOpParams.lcid = lc0Lcid;
-      int subframes = raResponse.ulGrant.subframes.second.back() -
+      int subframes = raResponse.rarPayload.ulGrant.subframes.second.back() -
                       (10 * (m_frameNo - 1) + m_subframeNo - 1);
+      const uint8_t subcarrier = raResponse.rarPayload.ulGrant.subframes.first;
 
-      uint32_t subframesTillNpusch = raResponse.ulGrant.subframes.second.front() - (10*(m_frameNo-1)+m_subframeNo-1);
+      // MAC owns the final RAR acceptance decision (RAPID + ToA). Only now we
+      // program Msg3 UL resources in PHY.
+      m_uePhySapProvider->ScheduleNprachMsg3Transmission (subcarrier,
+                                                          static_cast<uint32_t> (std::max (0, subframes)));
+
+      // Keep RSRP/CQI feedback tied to the accepted RAR only.
+      Ptr<DlCqiLteControlMessage> report = Create<DlCqiLteControlMessage> ();
+      CqiListElement_s dlcqi;
+      dlcqi.m_rnti = raResponse.rarPayload.cellRnti;
+      dlcqi.m_ri = 1;
+      dlcqi.m_cqiType = CqiListElement_s::P10;
+      report->SetDlCqi (dlcqi);
+      report->rsrp = m_uePhySapProvider->GetRSRP ();
+      m_uePhySapProvider->SendLteControlMessage (report);
+
+      uint32_t subframesTillNpusch = raResponse.rarPayload.ulGrant.subframes.second.front() - (10*(m_frameNo-1)+m_subframeNo-1);
 
       m_transmissionScheduled = true;
       Simulator::Schedule(MilliSeconds(subframesTillNpusch), &LteUeCmacSapUser::NotifyEnergyState, m_cmacSapUser, NbiotEnergyModel::PowerState::RRC_CONNECTED_SENDING_NPUSCH);
@@ -883,6 +975,10 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
           }
         }
       NS_LOG_INFO ("RAR timeout, re-send preamble");
+      NS_LOG_INFO ("[UE][MSG1][RETRY] imsi=" << m_imsi
+                  << " preambleTxCounter=" << static_cast<uint32_t> (m_preambleTransmissionCounter)
+                  << " ceLevel="
+                  << static_cast<uint32_t> (m_CeLevel.coverageEnhancementLevel));
       LogMessage("LteUeMac::RaResponseTimeoutNb,RAR timeout, re-send preamble");  
       if (contention)
         {
@@ -1358,22 +1454,93 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
                              << (uint32_t) m_raRnti);
           if (raRnti == m_raRnti) // RAR corresponds to TX subframe of preamble
             {
+              const uint8_t expectedRapid =
+                  static_cast<uint8_t> (NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) +
+                                        m_raPreambleId);
+              const uint32_t localMetaId = NbIotToaUtils::ToaMetaIdFromImsi (m_imsi);
+              const uint16_t localToaBin = NbIotToaUtils::ComputeToaBin (localMetaId, m_toaNumBins);
+              bool hasToaRarForRapid = false;
+              if (m_newSchemaActivated)
+                {
+                  for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
+                       it != rarMsg->RarListEnd (); ++it)
+                    {
+                      if ((it->rapId == expectedRapid) && it->toaValid)
+                        {
+                          hasToaRarForRapid = true;
+                          break;
+                        }
+                    }
+                }
+
+              bool rarAccepted = false;
               for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
                    it != rarMsg->RarListEnd (); ++it)
                 {
-                  // === LOG SARA (SOLO IMPRESIÓN; SIN CAMBIAR LA LÓGICA) ===
-                  NS_LOG_INFO ("UE RAR rx (NB): RA-RNTI=" << (uint32_t) rarMsg->GetRaRnti()
-                              << " RAPID=" << (uint32_t) it->rapId
-                              << " TCRNTI=" << it->cellRnti
-                              << " SARA[group=" << (it->saraGroup ? "1":"0")
-                              << ", size=" << (uint32_t) it->saraGroupSize << "]");
-                  if (it->rapId == NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) +
-                                       m_raPreambleId) // RAR is for me
+                  if (rarAccepted || (it->rapId != expectedRapid))
                     {
-                      RecvRaResponseNb (it->rarPayload);
+                      continue;
+                    }
+
+                  NS_LOG_INFO ("[UE][MSG2][RX] imsi=" << m_imsi
+                              << " ra-rnti=" << static_cast<uint32_t> (rarMsg->GetRaRnti ())
+                              << " rapid=" << static_cast<uint32_t> (it->rapId)
+                              << " tc-rnti=" << it->cellRnti
+                              << " toaValid=" << (it->toaValid ? "1" : "0")
+                              << " toaBin=" << static_cast<uint32_t> (it->toaBin)
+                              << " virtualId=" << static_cast<uint32_t> (it->virtualId)
+                              << " codebook=" << static_cast<uint32_t> (it->codebookId)
+                              << " localToaBin=" << static_cast<uint32_t> (localToaBin));
+
+                  // Legacy path: accept first matching RAPID.
+                  if (!m_newSchemaActivated || !hasToaRarForRapid)
+                    {
+                      NS_LOG_INFO ("[UE][MSG2][ACCEPT] imsi=" << m_imsi
+                                  << " reason=legacy-first-match"
+                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
+                                  << " tc-rnti=" << it->cellRnti
+                                  << " codebook=" << static_cast<uint32_t> (it->codebookId)
+                                  << " virtualId=" << static_cast<uint32_t> (it->virtualId));
+                      RecvRaResponseNb (*it);
+                      rarAccepted = true; // accept only one RAR per RA attempt
+                      break;
+                    }
+
+                  // New schema path: when ToA-tagged RAR exists for this RAPID,
+                  // accept only by local ToA match.
+                  if (!it->toaValid)
+                    {
+                      NS_LOG_INFO ("[UE][MSG2][REJECT] imsi=" << m_imsi
+                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
+                                  << " reason=no-toa");
+                      continue;
+                    }
+
+                  if (NbIotToaUtils::MatchToa (localToaBin, it->toaBin, m_toaToleranceBins))
+                    {
+                      NS_LOG_INFO ("[UE][MSG2][ACCEPT] imsi=" << m_imsi
+                                  << " reason=toa-match"
+                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
+                                  << " localToaBin=" << static_cast<uint32_t> (localToaBin)
+                                  << " rarToaBin=" << static_cast<uint32_t> (it->toaBin)
+                                  << " tc-rnti=" << it->cellRnti
+                                  << " codebook=" << static_cast<uint32_t> (it->codebookId)
+                                  << " virtualId=" << static_cast<uint32_t> (it->virtualId));
+                      RecvRaResponseNb (*it);
+                      rarAccepted = true; // accept only one RAR per RA attempt
                       /// \todo RRC generates the RecvRaResponse messaged
                       /// for avoiding holes in transmission at PHY layer
                       /// (which produce erroneous UL CQI evaluation)
+                      break;
+                    }
+                  else
+                    {
+                      NS_LOG_INFO ("[UE][MSG2][REJECT] imsi=" << m_imsi
+                                  << " reason=toa-mismatch"
+                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
+                                  << " localToaBin=" << static_cast<uint32_t> (localToaBin)
+                                  << " rarToaBin=" << static_cast<uint32_t> (it->toaBin)
+                                  << " tolerance=" << static_cast<uint32_t> (m_toaToleranceBins));
                     }
                 }
             }

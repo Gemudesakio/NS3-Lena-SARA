@@ -45,11 +45,14 @@
 
 #include "nb-iot-data-volume-and-power-headroom-tag.h"
 #include "nb-iot-buffer-status-report-tag.h"
+#include "nb-iot-scma-msg3-tag.h"
+#include "nb-iot-toa-utils.h"
 #include "lte-rlc-am-header.h"
 #include "ns3/random-variable-stream.h"   // << NECESARIO para UniformRandomVariable
 
 #include <algorithm>
 #include <fstream>
+#include <sstream>
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("LteEnbMac");
@@ -307,7 +310,8 @@ public:
   virtual void SubframeIndication (uint32_t frameNo, uint32_t subframeNo);
   virtual void ReceiveLteControlMessage (Ptr<LteControlMessage> msg);
   virtual void ReceiveRachPreamble (uint32_t prachId);
-  virtual void ReceiveNprachPreamble (uint32_t prachId, uint8_t subcarrierOffset, uint32_t ranti);
+  virtual void ReceiveNprachPreamble (uint32_t prachId, uint8_t subcarrierOffset, uint32_t ranti,
+                                      uint32_t senderMetaId);
   virtual void UlCqiReport (FfMacSchedSapProvider::SchedUlCqiInfoReqParameters ulcqi);
   virtual void UlCqiReportNb (std::vector<double> ulcqi);
   virtual void UlInfoListElementHarqFeeback (UlInfoListElement_s params);
@@ -349,10 +353,12 @@ EnbMacMemberLteEnbPhySapUser::ReceiveRachPreamble (uint32_t prachId)
 
 void
 //====== funcion que recibe el preambulo desde la capa physical ======
-EnbMacMemberLteEnbPhySapUser::ReceiveNprachPreamble (uint32_t prachId, uint8_t subcarrierOffset,
-                                                     uint32_t ranti)
+EnbMacMemberLteEnbPhySapUser::ReceiveNprachPreamble (uint32_t prachId,
+                                                     uint8_t subcarrierOffset,
+                                                     uint32_t ranti,
+                                                     uint32_t senderMetaId)
 {
-  m_mac->DoReceiveNprachPreamble (prachId, subcarrierOffset, ranti);
+  m_mac->DoReceiveNprachPreamble (prachId, subcarrierOffset, ranti, senderMetaId);
 }
 void
 EnbMacMemberLteEnbPhySapUser::UlCqiReport (FfMacSchedSapProvider::SchedUlCqiInfoReqParameters ulcqi)
@@ -417,34 +423,52 @@ LteEnbMac::GetTypeId (void)
                          "ComponentCarrier Id, needed to reply on the appropriate sap.",
                          UintegerValue (0), MakeUintegerAccessor (&LteEnbMac::m_componentCarrierId),
                          MakeUintegerChecker<uint8_t> (0, 4))
-  //================================ Nuevos atributos para NB-IoT SARA ===================================
-          .AddAttribute ("SaraActivated",
-            "Enable SARA collision detector and group RARs.",
+  //=========================== Nuevo esquema + detector de colisiones ===========================
+          .AddAttribute ("NewSchemaActivated",
+            "Enable the new SCMA-based random access scheme. If false, legacy flow is used.",
             BooleanValue (false),
-            MakeBooleanAccessor (&LteEnbMac::m_saraActivated),
+            MakeBooleanAccessor (&LteEnbMac::m_newSchemaActivated),
             MakeBooleanChecker ())
 
-          .AddAttribute ("SaraTpr",
-            "SARA true-positive probability for 2-UE collision detection [0..1].",
+          .AddAttribute ("NumScmaCodebooks",
+            "Number of logical SCMA codebooks per physical subcarrier.",
+            UintegerValue (6),
+            MakeUintegerAccessor (&LteEnbMac::m_numScmaCodebooks),
+            MakeUintegerChecker<uint8_t> (1, 16))
+
+          .AddAttribute ("ToaNumBins",
+            "Number of quantization bins used for local ToA matching.",
+            UintegerValue (64),
+            MakeUintegerAccessor (&LteEnbMac::m_toaNumBins),
+            MakeUintegerChecker<uint16_t> (2, 4096))
+
+          .AddAttribute ("ToaToleranceBins",
+            "Tolerance (in bins) for local ToA matching.",
+            UintegerValue (1),
+            MakeUintegerAccessor (&LteEnbMac::m_toaToleranceBins),
+            MakeUintegerChecker<uint16_t> (0, 64))
+
+          .AddAttribute ("ScmaTpr",
+            "Collision-detector true-positive probability [0..1].",
             DoubleValue (0.975),
-            MakeDoubleAccessor (&LteEnbMac::m_saraTpr),
+            MakeDoubleAccessor (&LteEnbMac::m_scmaTpr),
             MakeDoubleChecker<double> (0.0, 1.0))
 
-          .AddAttribute ("SaraFpr",
-            "SARA false-positive probability for non-collision [0..1].",
+          .AddAttribute ("ScmaFpr",
+            "Collision-detector false-positive probability [0..1].",
             DoubleValue (0.001),
-            MakeDoubleAccessor (&LteEnbMac::m_saraFpr),
+            MakeDoubleAccessor (&LteEnbMac::m_scmaFpr),
             MakeDoubleChecker<double> (0.0, 1.0))
 
-          .AddAttribute ("SaraMaxGroupSize",
-            "Max UEs grouped per RAPID when SARA detects a collision.",
+          .AddAttribute ("ScmaMaxGroupSize",
+            "Max UEs grouped per RAPID when the detector marks collision.",
             UintegerValue (2),
-            MakeUintegerAccessor (&LteEnbMac::m_saraMaxGroupSize),
+            MakeUintegerAccessor (&LteEnbMac::m_scmaMaxGroupSize),
             MakeUintegerChecker<uint8_t> (1, 8))
 
           .AddAttribute ("DropPreambleCollision",
                 "If true, the eNB discards preambles when a collision is detected "
-                "(legacy NB-IoT behavior). If false, collisions are processed (required for SARA).",
+                "(legacy NB-IoT behavior). If false, collisions are processed (required for NewSchema/SCMA).",
                 BooleanValue (true),   // valor por defecto
                 MakeBooleanAccessor (&LteEnbMac::m_dropPreambleCollision),
                 MakeBooleanChecker ());
@@ -461,18 +485,29 @@ LteEnbMac::LteEnbMac () : m_ccmMacSapUser (0)
   m_enbPhySapUser = new EnbMacMemberLteEnbPhySapUser (this);
   m_ccmMacSapProvider = new MemberLteCcmMacSapProvider<LteEnbMac> (this);
   m_dropPreambleCollision = true;
-  
-   // --- SARA: defaults coherentes con los atributos registrados ---
-  m_saraActivated     = false;
-  m_saraTpr           = 0.975;
-  m_saraFpr           = 0.001;
-  m_saraMaxGroupSize  = 2;
 
-  if (m_saraRng == 0)
+  // --- Nuevo esquema: defaults coherentes con atributos ---
+  m_newSchemaActivated = false;
+  m_numScmaCodebooks = 6;
+  m_toaNumBins = 64;
+  m_toaToleranceBins = 1;
+  m_msg1RxCount = 0;
+  m_msg2TxCount = 0;
+  m_msg3RxCount = 0;
+  m_msg3DropCount = 0;
+  m_collisionRapidCount = 0;
+  m_collisionUeCount = 0;
+
+  // --- Detector de colisiones (matriz de confusión) ---
+  m_scmaTpr = 0.975;
+  m_scmaFpr = 0.001;
+  m_scmaMaxGroupSize = 2;
+
+  if (m_scmaRng == 0)
     {
-      m_saraRng = CreateObject<UniformRandomVariable> ();
-      m_saraRng->SetAttribute ("Min", DoubleValue (0.0));
-      m_saraRng->SetAttribute ("Max", DoubleValue (1.0));
+      m_scmaRng = CreateObject<UniformRandomVariable> ();
+      m_scmaRng->SetAttribute ("Min", DoubleValue (0.0));
+      m_scmaRng->SetAttribute ("Max", DoubleValue (1.0));
     }
 }
 
@@ -486,6 +521,12 @@ void
 LteEnbMac::DoDispose (void)
 {
   NS_LOG_FUNCTION (this);
+  NS_LOG_INFO ("[ENB][SUMMARY] MSG1_RX=" << m_msg1RxCount
+               << " RAPIDS_COLISIONADOS=" << m_collisionRapidCount
+               << " UES_EN_COLISION=" << m_collisionUeCount);
+  NS_LOG_INFO ("[ENB][SUMMARY] MSG2_TX=" << m_msg2TxCount);
+  NS_LOG_INFO ("[ENB][SUMMARY] MSG3_RX_OK=" << m_msg3RxCount
+               << " MSG3_DROP=" << m_msg3DropCount);
  //limpia vartiables de estado
   m_dlCqiReceived.clear ();
   m_ulCqiReceived.clear ();
@@ -493,9 +534,11 @@ LteEnbMac::DoDispose (void)
   m_dlInfoListReceived.clear ();
   m_ulInfoListReceived.clear ();
   m_miDlHarqProcessesPackets.clear ();
+  m_nprachRxMetaByRapid.clear ();
+  m_expectedScmaMsg3ByTcRnti.clear ();
 
-  // SARA: suelta la ref del RNG (smart pointer)
-  m_saraRng = 0;
+  // Detector de colisiones: suelta la ref del RNG (smart pointer)
+  m_scmaRng = 0;
 
   // Solo si existe; y nulificar luego
   if (m_schedulerNb)
@@ -832,14 +875,26 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
       for (std::map<uint8_t, uint32_t>::iterator iter = receivedNprachs.begin ();
            iter != receivedNprachs.end (); ++iter)
         {
+          const uint16_t rapid = static_cast<uint16_t> (subcarrierOffset + iter->first);
+          const uint16_t ranti = m_rapIdRantiMap[rapid];
+          NS_LOG_INFO ("[ENB][MSG1][OCCASION] rapid=" << rapid
+                       << " ra-rnti=" << ranti
+                       << " preamble=" << static_cast<uint32_t> (iter->first)
+                       << " ueCount=" << iter->second);
+
           if (iter->second == 1)
             { // sanity check. Actually should be always equal
 
               //NS_BUILD_DEBUG (std::cout << "Preamble received of offset " << int (subcarrierOffset) << " at Subframe " << (10 * (m_frameNo - 1) + (m_subframeNo - 1)) << std::endl);
               NbIotRrcSap::Rar rar;
               rar.cellRnti = m_cmacSapUser->AllocateTemporaryCellRnti ();
-              rar.rapId = subcarrierOffset + iter->first;
+              rar.rapId = rapid;
               rar.rarPayload.cellRnti = rar.cellRnti;
+              rar.ceLevel = ce.coverageEnhancementLevel;
+              rar.toaValid = false;
+              rar.toaBin = 0;
+              rar.codebookId = 0;
+              rar.virtualId = 0;
 
               if (m_mac_logging)
               {
@@ -850,12 +905,44 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
                 logfile.close();
               }
 
-              m_rarQueue.push_back (
-                  std::make_pair (m_rapIdRantiMap[subcarrierOffset + iter->first], rar));
+              m_rarQueue.push_back (std::make_pair (ranti, rar));
               m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
+              m_nprachRxMetaByRapid.erase (rapid);
+              NS_LOG_INFO ("[ENB][MSG2][PLAN] rapid=" << rapid
+                           << " tipo=no-colision"
+                           << " tc-rnti=" << rar.cellRnti);
             }
           else if (iter->second > 1)
             {
+              ++m_collisionRapidCount;
+              m_collisionUeCount += iter->second;
+              std::map<uint16_t, std::vector<NprachRxMeta>>::const_iterator rxIt =
+                  m_nprachRxMetaByRapid.find (rapid);
+              if (rxIt != m_nprachRxMetaByRapid.end ())
+                {
+                  std::ostringstream oss;
+                  for (std::vector<NprachRxMeta>::const_iterator e = rxIt->second.begin ();
+                       e != rxIt->second.end (); ++e)
+                    {
+                      if (e != rxIt->second.begin ())
+                        {
+                          oss << ";";
+                        }
+                      oss << "meta=" << e->senderMetaId << "/toa=" << e->toaBin;
+                    }
+                  NS_LOG_INFO ("[ENB][MSG1][COLLISION] rapid=" << rapid
+                               << " ra-rnti=" << ranti
+                               << " ueCount=" << iter->second
+                               << " participantes=[" << oss.str () << "]");
+                }
+              else
+                {
+                  NS_LOG_INFO ("[ENB][MSG1][COLLISION] rapid=" << rapid
+                               << " ra-rnti=" << ranti
+                               << " ueCount=" << iter->second
+                               << " participantes=[sin-meta]");
+                }
+
               // === Log opcional ===
               if (m_mac_logging)
                 {
@@ -870,60 +957,98 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
               if (m_dropPreambleCollision)
                 {
                   m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
+                  m_nprachRxMetaByRapid.erase (rapid);
                   continue;
                 }
 
               // A partir de aquí: procesar la colisión (k >= 2). En NB-IoT real no conoces k exacto,
-              // pero aquí al menos sabes que hubo >1. Usamos SARA si está activado.
-              m_rapIdCollisionMap[subcarrierOffset + iter->first] = true;
-
-              const uint8_t rapid = subcarrierOffset + iter->first;
-              const uint16_t ranti = m_rapIdRantiMap[rapid];
+              // pero aquí al menos sabes que hubo >1. Usamos el nuevo esquema si está activado.
+              m_rapIdCollisionMap[rapid] = true;
 
               bool predictCollision = false;
 
-              if (m_saraActivated)
+              if (m_newSchemaActivated)
                 {
                   // Matriz de confusión: aquí k>=2 => caso "colisión real"
                   // Detectamos con probabilidad TPR (true positive rate)
-                  double u = m_saraRng->GetValue (0.0, 1.0);
-                  predictCollision = (u < m_saraTpr);
+                  double u = m_scmaRng->GetValue (0.0, 1.0);
+                  predictCollision = (u < m_scmaTpr);
                 }
-              // Si SARA no está activado, predictCollision queda en false (flujo legacy).
+              // Si el nuevo esquema no está activado, predictCollision queda en false (flujo legacy).
 
               if (predictCollision)
                 {
-                  // --- SARA: "colisión detectada" -> emitir RAR(es) de grupo ---
+                  // --- NewSchema/SCMA: "colisión detectada" -> emitir RAR(es) de grupo ---
                   // Tamaño de grupo (primer hito: 2). Aunque iter->second pueda ser >2,
-                  // capamos a m_saraMaxGroupSize (normalmente =2) para el primer milestone.
-                  const uint8_t groupSize = std::min<uint8_t> (m_saraMaxGroupSize, 2);
-
-                   // LOG 1: anuncio de generación de RAR(es) de grupo
-                  NS_LOG_INFO ("eNB SARA: generar " << int(groupSize)
-                              << " RAR para RAPID=" << int(rapid)
-                              << " RA-RNTI=" << ranti);
-
-                  for (uint8_t n = 0; n < groupSize; ++n)
+                  // capamos a m_scmaMaxGroupSize (normalmente =2) para el primer milestone.
+                  const uint8_t groupSize = std::min<uint8_t> (m_scmaMaxGroupSize, 2);
+                  std::vector<NprachRxMeta> selected = SelectCollisionCandidates (rapid, groupSize);
+                  const uint8_t selectedCount = static_cast<uint8_t> (selected.size ());
+                  if (selectedCount == 0)
                     {
+                      // Safety fallback: keep one RAR if metadata is missing.
                       NbIotRrcSap::Rar rar;
                       rar.cellRnti = m_cmacSapUser->AllocateTemporaryCellRnti ();
                       rar.rapId = rapid;
                       rar.rarPayload.cellRnti = rar.cellRnti;
                       rar.ceLevel = ce.coverageEnhancementLevel;
+                      rar.toaValid = false;
+                      rar.toaBin = 0;
+                      rar.codebookId = 0;
+                      rar.virtualId = 0;
+                      m_rarQueue.push_back (std::make_pair (ranti, rar));
+                      m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
+                      m_nprachRxMetaByRapid.erase (rapid);
+                      m_RntiCeMap.insert (std::make_pair (rar.cellRnti, ce.coverageEnhancementLevel));
+                      continue;
+                    }
 
-                      // --- Campos SARA en el RAR ---
-                      rar.saraGroup     = true;
-                      rar.saraGroupSize = groupSize;
-                      rar.saraTag       = n;   // 0,1,... (útil para debug)
+                   // LOG 1: anuncio de generación de RAR(es) de grupo
+                  NS_LOG_INFO ("eNB SCMA: generar " << int(selectedCount)
+                              << " RAR para RAPID=" << int(rapid)
+                              << " RA-RNTI=" << ranti);
+                  std::ostringstream sel;
+                  for (uint8_t n = 0; n < selectedCount; ++n)
+                    {
+                      if (n > 0)
+                        {
+                          sel << ";";
+                        }
+                      sel << "meta=" << selected[n].senderMetaId
+                          << "/toa=" << selected[n].toaBin;
+                    }
+                  NS_LOG_INFO ("[ENB][MSG2][COLLISION-SELECT] rapid=" << rapid
+                               << " seleccion=[" << sel.str () << "]");
+
+                  for (uint8_t n = 0; n < selectedCount; ++n)
+                    {
+                      const NprachRxMeta &candidate = selected[n];
+                      NbIotRrcSap::Rar rar;
+                      rar.cellRnti = m_cmacSapUser->AllocateTemporaryCellRnti ();
+                      rar.rapId = rapid;
+                      rar.rarPayload.cellRnti = rar.cellRnti;
+                      rar.ceLevel = ce.coverageEnhancementLevel;
+                      rar.toaValid = true;
+                      rar.toaBin = candidate.toaBin;
+                      rar.codebookId = static_cast<uint8_t> (n % std::max<uint8_t> (1, m_numScmaCodebooks));
+                      rar.virtualId = 0;
 
                       // Encolar SIEMPRE en m_rarQueue (¡no dejes RARs huérfanos!)
-                      m_rarQueue.push_back (std::make_pair (ranti, rar));
+                      m_rarQueue.push_back (std::make_pair (candidate.ranti, rar));
 
                        // LOG 2: confirmación de cada RAR encolado
                       NS_LOG_INFO ("eNB RAR encolado: RAPID=" << int(rar.rapId)
                                   << " TCRNTI=" << rar.cellRnti
-                                  << " SARA[group=1, size=" << int(groupSize)
-                                  << ", tag=" << int(n) << "]");
+                                  << " codebook=" << int(rar.codebookId)
+                                  << " toaValid=" << (rar.toaValid ? "1" : "0")
+                                  << " toaBin=" << rar.toaBin
+                                  << " senderMetaId=" << candidate.senderMetaId);
+                      NS_LOG_INFO ("[ENB][MSG2][PLAN] rapid=" << rapid
+                                   << " tipo=colision"
+                                   << " tc-rnti=" << rar.cellRnti
+                                   << " senderMetaId=" << candidate.senderMetaId
+                                   << " toaBin=" << rar.toaBin
+                                   << " codebook=" << static_cast<uint32_t> (rar.codebookId));
 
                       // Guarda CE por RNTI (igual que en el flujo normal)
                       m_RntiCeMap.insert (std::make_pair (rar.cellRnti, ce.coverageEnhancementLevel));
@@ -931,6 +1056,7 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
 
                   // Limpiar el conteo de preámbulos de este RAPID (como en legacy)
                   m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
+                  m_nprachRxMetaByRapid.erase (rapid);
                 }
               else
                 {
@@ -942,13 +1068,18 @@ Cinco símbolos contiguos (cada uno de 8192 muestras) */
                   rar.rapId = rapid;
                   rar.rarPayload.cellRnti = rar.cellRnti;
                   rar.ceLevel = ce.coverageEnhancementLevel;
-
-                  // Sin SARA: estos flags se quedan por defecto (false, 1, 0)
-                  // rar.saraGroup = false; rar.saraGroupSize = 1; rar.saraTag = 0;
+                  rar.toaValid = false;
+                  rar.toaBin = 0;
+                  rar.codebookId = 0;
+                  rar.virtualId = 0;
 
                   m_rarQueue.push_back (std::make_pair (ranti, rar));
                   m_receivedNprachPreambleCount[subcarrierOffset].erase (iter->first);
+                  m_nprachRxMetaByRapid.erase (rapid);
                   m_RntiCeMap.insert (std::make_pair (rar.cellRnti, ce.coverageEnhancementLevel));
+                  NS_LOG_INFO ("[ENB][MSG2][PLAN] rapid=" << rapid
+                               << " tipo=legacy-fallback"
+                               << " tc-rnti=" << rar.cellRnti);
                 }
             }
 
@@ -1083,7 +1214,9 @@ LteEnbMac::DoSubframeIndicationNb (uint32_t frameNo, uint32_t subframeNo)
       m_schedulerNb = new NbiotScheduler (
           std::vector<NbIotRrcSap::NprachParametersNb>{m_ce0Parameter, m_ce1Parameter,
                                                        m_ce2Parameter},
-          m_sib2Nb);
+          m_sib2Nb,
+          m_newSchemaActivated,
+          m_numScmaCodebooks);
       m_schedulerNb->SetLogDir(m_logdir);
     }
   // Implement NB-IoT DCI Searchspaces Type2-CSS All AL2  Liberg et al. p 282
@@ -1113,6 +1246,37 @@ LteEnbMac::DoSubframeIndicationNb (uint32_t frameNo, uint32_t subframeNo)
           for (std::vector<NbIotRrcSap::Rar>::iterator rar = it->rars.begin ();
                rar != it->rars.end (); ++rar)
             {
+              NS_LOG_INFO ("eNB RAR tx prepared: RA-RNTI=" << it->ranti
+                          << " RAPID=" << static_cast<uint32_t> (rar->rapId)
+                          << " C-RNTI=" << rar->cellRnti
+                          << " virtualId=" << rar->virtualId
+                          << " codebook=" << static_cast<uint32_t> (rar->codebookId)
+                          << " toaValid=" << (rar->toaValid ? "1" : "0")
+                          << " toaBin=" << rar->toaBin
+                          << " grantPhysical=" << static_cast<uint32_t> (rar->rarPayload.ulGrant.subframes.first));
+              ++m_msg2TxCount;
+              NS_LOG_INFO ("[ENB][MSG2][TX] ra-rnti=" << it->ranti
+                           << " rapid=" << static_cast<uint32_t> (rar->rapId)
+                           << " tc-rnti=" << rar->cellRnti
+                           << " toaValid=" << (rar->toaValid ? "1" : "0")
+                           << " toaBin=" << rar->toaBin
+                           << " virtualId=" << rar->virtualId
+                           << " codebook=" << static_cast<uint32_t> (rar->codebookId)
+                           << " physicalCarrier="
+                           << static_cast<uint32_t> (rar->rarPayload.ulGrant.subframes.first));
+
+              if (m_newSchemaActivated)
+                {
+                  ScmaMsg3ExpectedContext expected;
+                  expected.tcRnti = rar->cellRnti;
+                  expected.virtualId = rar->virtualId;
+                  expected.codebookId = rar->codebookId;
+                  expected.physicalCarrier = rar->rarPayload.ulGrant.subframes.first;
+                  expected.rapid = rar->rapId;
+                  expected.toaValid = rar->toaValid;
+                  expected.toaBin = rar->toaBin;
+                  m_expectedScmaMsg3ByTcRnti[expected.tcRnti] = expected;
+                }
               msg->AddRar (*rar);
             }
           msg->SetRaRnti (it->ranti);
@@ -1361,10 +1525,79 @@ LteEnbMac::DoReceiveRachPreamble (uint8_t rapId)
   // just record that the preamble has been received; it will be processed later
   ++m_receivedRachPreambleCount[rapId]; // will create entry if not exists
 }
-void
+
+uint16_t
+LteEnbMac::EstimateToaBinFromSender (uint32_t senderMetaId) const
+{
+  return NbIotToaUtils::ComputeToaBin (senderMetaId, m_toaNumBins);
+}
+
+std::vector<LteEnbMac::NprachRxMeta>
+LteEnbMac::SelectCollisionCandidates (uint16_t rapid, uint8_t maxCandidates) const
+{
+  std::vector<NprachRxMeta> selected;
+  if (maxCandidates == 0)
+    {
+      return selected;
+    }
+
+  std::map<uint16_t, std::vector<NprachRxMeta>>::const_iterator it =
+      m_nprachRxMetaByRapid.find (rapid);
+  if (it == m_nprachRxMetaByRapid.end ())
+    {
+      return selected;
+    }
+
+  std::vector<NprachRxMeta> entries = it->second;
+  std::sort (entries.begin (), entries.end (),
+             [] (const NprachRxMeta &a, const NprachRxMeta &b)
+             {
+               if (a.toaBin != b.toaBin)
+                 {
+                   return a.toaBin < b.toaBin;
+                 }
+               return a.senderMetaId < b.senderMetaId;
+             });
+
+  // Pass 1: prefer distinct ToA bins.
+  for (std::vector<NprachRxMeta>::const_iterator e = entries.begin ();
+       e != entries.end () && selected.size () < maxCandidates; ++e)
+    {
+      bool senderAlreadySelected = false;
+      bool toaAlreadySelected = false;
+      for (std::vector<NprachRxMeta>::const_iterator s = selected.begin (); s != selected.end (); ++s)
+        {
+          senderAlreadySelected = senderAlreadySelected || (s->senderMetaId == e->senderMetaId);
+          toaAlreadySelected = toaAlreadySelected || (s->toaBin == e->toaBin);
+        }
+      if (!senderAlreadySelected && !toaAlreadySelected)
+        {
+          selected.push_back (*e);
+        }
+    }
+
+  // Pass 2: if needed, fill with remaining distinct senders.
+  for (std::vector<NprachRxMeta>::const_iterator e = entries.begin ();
+       e != entries.end () && selected.size () < maxCandidates; ++e)
+    {
+      bool senderAlreadySelected = false;
+      for (std::vector<NprachRxMeta>::const_iterator s = selected.begin (); s != selected.end (); ++s)
+        {
+          senderAlreadySelected = senderAlreadySelected || (s->senderMetaId == e->senderMetaId);
+        }
+      if (!senderAlreadySelected)
+        {
+          selected.push_back (*e);
+        }
+    }
+
+  return selected;
+}
 
 //  ===== paso 1 RA recibe preambulo y aumenta contador para esa subtrama y rapId =====
-LteEnbMac::DoReceiveNprachPreamble (uint8_t rapId, uint8_t subcarrierOffset, uint32_t ranti)
+void
+LteEnbMac::DoReceiveNprachPreamble (uint8_t rapId, uint8_t subcarrierOffset, uint32_t ranti,
+                                    uint32_t senderMetaId)
 {
   // ====== registra el preámbulo recibido: incrementa el contador correspondiente ======
   NS_LOG_FUNCTION (this << (uint32_t) rapId);
@@ -1375,7 +1608,24 @@ LteEnbMac::DoReceiveNprachPreamble (uint8_t rapId, uint8_t subcarrierOffset, uin
  
   // ====== asocia el par (subportadora + rapId) con el RNTI del UE en un vector clave valor ======
   // ====== para crear una clave unica que permite distinguir entre preámbulos similares en distintas subportadoras ======
-  m_rapIdRantiMap[subcarrierOffset + rapId] = ranti;
+  const uint16_t rapid = static_cast<uint16_t> (subcarrierOffset + rapId);
+  m_rapIdRantiMap[rapid] = ranti;
+
+  NprachRxMeta rx;
+  rx.rapid = rapid;
+  rx.ranti = ranti;
+  rx.senderMetaId = senderMetaId;
+  rx.toaBin = EstimateToaBinFromSender (senderMetaId);
+  rx.subcarrierOffset = subcarrierOffset;
+  m_nprachRxMetaByRapid[rapid].push_back (rx);
+  ++m_msg1RxCount;
+
+  NS_LOG_INFO ("[ENB][MSG1][RX] rapid=" << rapid
+               << " ra-rnti=" << ranti
+               << " preamble=" << static_cast<uint32_t> (rapId)
+               << " subcarrierOffset=" << static_cast<uint32_t> (subcarrierOffset)
+               << " senderMetaId=" << senderMetaId
+               << " toaBin=" << rx.toaBin);
 }
 
 void
@@ -1478,8 +1728,89 @@ LteEnbMac::DoReceivePhyPdu (Ptr<Packet> p)
 
   DataVolumeAndPowerHeadroomTag dprTag;
   BufferStatusReportTag bsrTag;
+  NbIotScmaMsg3Tag scmaMsg3Tag;
   uint32_t buffersize;
   if(p->RemovePacketTag(dprTag)){ // it's MSG3
+    NS_LOG_INFO ("[ENB][MSG3][RX] tc-rnti=" << rnti
+                 << " lcid=" << static_cast<uint32_t> (lcid)
+                 << " pktUid=" << p->GetUid ());
+    const bool hasScmaMsg3Tag = p->PeekPacketTag (scmaMsg3Tag);
+    if (hasScmaMsg3Tag)
+      {
+        p->RemovePacketTag (scmaMsg3Tag);
+      }
+
+    if (m_newSchemaActivated)
+      {
+        std::map<uint16_t, ScmaMsg3ExpectedContext>::iterator expectedIt =
+            m_expectedScmaMsg3ByTcRnti.find (rnti);
+        if (expectedIt == m_expectedScmaMsg3ByTcRnti.end ())
+          {
+            NS_LOG_WARN ("eNB MSG3 drop: no expected SCMA context for tcRnti=" << rnti);
+            NS_LOG_WARN ("[ENB][MSG3][DROP] tc-rnti=" << rnti << " reason=no-expected-context");
+            ++m_msg3DropCount;
+            return;
+          }
+        if (!hasScmaMsg3Tag)
+          {
+            NS_LOG_WARN ("eNB MSG3 drop: missing SCMA tag for tcRnti=" << rnti
+                        << " expectedVirtualId=" << expectedIt->second.virtualId
+                        << " expectedCodebook=" << static_cast<uint32_t> (expectedIt->second.codebookId));
+            NS_LOG_WARN ("[ENB][MSG3][DROP] tc-rnti=" << rnti << " reason=missing-tag");
+            ++m_msg3DropCount;
+            return;
+          }
+
+        const bool matches =
+            (scmaMsg3Tag.GetTcRnti () == expectedIt->second.tcRnti) &&
+            (scmaMsg3Tag.GetVirtualId () == expectedIt->second.virtualId) &&
+            (scmaMsg3Tag.GetCodebookId () == expectedIt->second.codebookId) &&
+            (scmaMsg3Tag.GetPhysicalCarrier () == expectedIt->second.physicalCarrier);
+        if (!matches)
+          {
+            NS_LOG_WARN ("eNB MSG3 drop: SCMA context mismatch tcRnti=" << rnti
+                        << " rx(tc=" << scmaMsg3Tag.GetTcRnti ()
+                        << ",v=" << scmaMsg3Tag.GetVirtualId ()
+                        << ",cb=" << static_cast<uint32_t> (scmaMsg3Tag.GetCodebookId ())
+                        << ",pc=" << static_cast<uint32_t> (scmaMsg3Tag.GetPhysicalCarrier ())
+                        << ") expected(tc=" << expectedIt->second.tcRnti
+                        << ",v=" << expectedIt->second.virtualId
+                        << ",cb=" << static_cast<uint32_t> (expectedIt->second.codebookId)
+                        << ",pc=" << static_cast<uint32_t> (expectedIt->second.physicalCarrier)
+                        << ")");
+            NS_LOG_WARN ("[ENB][MSG3][DROP] tc-rnti=" << rnti << " reason=context-mismatch");
+            ++m_msg3DropCount;
+            return;
+          }
+
+        NS_LOG_INFO ("eNB MSG3 accept: tcRnti=" << rnti
+                    << " virtualId=" << scmaMsg3Tag.GetVirtualId ()
+                    << " codebook=" << static_cast<uint32_t> (scmaMsg3Tag.GetCodebookId ())
+                    << " physicalCarrier=" << static_cast<uint32_t> (scmaMsg3Tag.GetPhysicalCarrier ()));
+        NS_LOG_INFO ("[ENB][MSG3][ACCEPT] tc-rnti=" << rnti
+                    << " virtualId=" << scmaMsg3Tag.GetVirtualId ()
+                    << " codebook=" << static_cast<uint32_t> (scmaMsg3Tag.GetCodebookId ())
+                    << " physicalCarrier=" << static_cast<uint32_t> (scmaMsg3Tag.GetPhysicalCarrier ()));
+        m_expectedScmaMsg3ByTcRnti.erase (expectedIt);
+      }
+    else if (hasScmaMsg3Tag)
+      {
+        NS_LOG_INFO ("eNB MSG3 rx tag: rnti=" << rnti
+                    << " tcRnti=" << scmaMsg3Tag.GetTcRnti ()
+                    << " virtualId=" << scmaMsg3Tag.GetVirtualId ()
+                    << " codebook=" << static_cast<uint32_t> (scmaMsg3Tag.GetCodebookId ())
+                    << " physicalCarrier=" << static_cast<uint32_t> (scmaMsg3Tag.GetPhysicalCarrier ()));
+        NS_LOG_INFO ("[ENB][MSG3][ACCEPT] tc-rnti=" << rnti
+                    << " virtualId=" << scmaMsg3Tag.GetVirtualId ()
+                    << " codebook=" << static_cast<uint32_t> (scmaMsg3Tag.GetCodebookId ())
+                    << " physicalCarrier=" << static_cast<uint32_t> (scmaMsg3Tag.GetPhysicalCarrier ()));
+      }
+    else
+      {
+        NS_LOG_INFO ("[ENB][MSG3][ACCEPT] tc-rnti=" << rnti << " mode=legacy");
+      }
+    ++m_msg3RxCount;
+
     buffersize = DataVolumeDPR::DVId2BufferSize(dprTag.GetDataVolumeValue());
     m_ueStoredBSR[rnti] = buffersize;
 
@@ -1613,6 +1944,7 @@ LteEnbMac::DoRemoveUe (uint16_t rnti)
   m_cschedSapProvider->CschedUeReleaseReq (params);
   m_rlcAttached.erase (rnti);
   m_miDlHarqProcessesPackets.erase (rnti);
+  m_expectedScmaMsg3ByTcRnti.erase (rnti);
 
   NS_LOG_DEBUG ("start checking for unprocessed preamble for rnti: " << rnti);
   //remove unprocessed preamble received for RACH during handover

@@ -35,13 +35,18 @@ NS_LOG_COMPONENT_DEFINE ("NbiotScheduler");
 NS_OBJECT_ENSURE_REGISTERED (NbiotScheduler);
 
 NbiotScheduler::NbiotScheduler (std::vector<NbIotRrcSap::NprachParametersNb> ces,
-                                NbIotRrcSap::SystemInformationBlockType2Nb sib2)
+                                NbIotRrcSap::SystemInformationBlockType2Nb sib2,
+                                bool newSchemaActivated,
+                                uint8_t numScmaCodebooks)
 {
   m_Amc = NbiotAmc ();
   m_ce0 = ces[0];
   m_ce1 = ces[1];
   m_ce2 = ces[2];
   m_sib2config = sib2;
+  m_newSchemaActivated = newSchemaActivated;
+  m_numScmaCodebooks = std::max<uint8_t> (1, numScmaCodebooks);
+  m_numPhysicalUlSubcarriers = 12;
   m_DciTimeOffsetRmaxSmall.reserve (8);
   m_DciTimeOffsetRmaxBig.reserve (8);
   m_Msg3TimeOffset.reserve (4);
@@ -209,11 +214,18 @@ NbiotScheduler::NbiotScheduler (std::vector<NbIotRrcSap::NprachParametersNb> ces
 
   if (m_only15KhzSpacing)
     {
-      m_uplink.resize (12, std::vector<int> ());
+      m_uplink.resize (m_numPhysicalUlSubcarriers, std::vector<int> ());
       for (size_t i = 0; i < m_uplink.size (); ++i)
         {
           m_uplink[i].resize (numHyperframes * numFrames * numSubframes, 0);
         }
+
+      m_msg3UplinkVirtual.resize (GetMsg3VirtualCarrierCount (), std::vector<int> ());
+      for (size_t i = 0; i < m_msg3UplinkVirtual.size (); ++i)
+        {
+          m_msg3UplinkVirtual[i].resize (numHyperframes * numFrames * numSubframes, 0);
+        }
+
       for (std::vector<NbIotRrcSap::NprachParametersNb>::iterator it = ces.begin ();
            it != ces.end (); ++it)
         {
@@ -241,7 +253,21 @@ NbiotScheduler::NbiotScheduler (std::vector<NbIotRrcSap::NprachParametersNb> ces
                     {
                       for (size_t k = 0; k < numberSubcarriers / 4; ++k)
                         {
-                          m_uplink[subcarrierOffset / 4 + k][i + j] = -1;
+                          const uint16_t physicalCarrier = subcarrierOffset / 4 + k;
+                          m_uplink[physicalCarrier][i + j] = -1;
+
+                          if (m_newSchemaActivated)
+                            {
+                              for (uint8_t cb = 0; cb < m_numScmaCodebooks; ++cb)
+                                {
+                                  const uint16_t virtualCarrier = GetVirtualCarrier (physicalCarrier, cb);
+                                  m_msg3UplinkVirtual[virtualCarrier][i + j] = -1;
+                                }
+                            }
+                          else
+                            {
+                              m_msg3UplinkVirtual[physicalCarrier][i + j] = -1;
+                            }
                         }
                     }
                   i += time_tmp;
@@ -249,6 +275,46 @@ NbiotScheduler::NbiotScheduler (std::vector<NbIotRrcSap::NprachParametersNb> ces
             }
         }
     }
+}
+
+uint16_t
+NbiotScheduler::GetMsg3VirtualCarrierCount () const
+{
+  if (!m_newSchemaActivated)
+    {
+      return m_numPhysicalUlSubcarriers;
+    }
+  return static_cast<uint16_t> (m_numPhysicalUlSubcarriers * m_numScmaCodebooks);
+}
+
+uint16_t
+NbiotScheduler::GetPhysicalCarrierFromVirtual (uint16_t virtualCarrier) const
+{
+  if (!m_newSchemaActivated)
+    {
+      return virtualCarrier;
+    }
+  return static_cast<uint16_t> (virtualCarrier / m_numScmaCodebooks);
+}
+
+uint8_t
+NbiotScheduler::GetCodebookFromVirtual (uint16_t virtualCarrier) const
+{
+  if (!m_newSchemaActivated)
+    {
+      return 0;
+    }
+  return static_cast<uint8_t> (virtualCarrier % m_numScmaCodebooks);
+}
+
+uint16_t
+NbiotScheduler::GetVirtualCarrier (uint16_t physicalCarrier, uint8_t codebook) const
+{
+  if (!m_newSchemaActivated)
+    {
+      return physicalCarrier;
+    }
+  return static_cast<uint16_t> (physicalCarrier * m_numScmaCodebooks + codebook);
 }
 
 void
@@ -453,7 +519,7 @@ NbiotScheduler::ScheduleNpdcchMessage (NbIotRrcSap::NpdcchMessage &message, Sear
           if (npdschsubframes.size () > 0) // WE GOT A DOWNLINK CANDIDATE
             {
               uint64_t subframesNpusch;
-              std::pair<NbIotRrcSap::UlGrant, std::pair<uint8_t, std::vector<uint64_t>>> ulgrant;
+              std::pair<NbIotRrcSap::UlGrant, std::pair<uint64_t, std::vector<uint64_t>>> ulgrant;
               if (message.isRar)
                 {
                   for (std::vector<NbIotRrcSap::Rar>::iterator rar = message.rars.begin ();
@@ -511,22 +577,44 @@ NbiotScheduler::ScheduleNpdcchMessage (NbIotRrcSap::NpdcchMessage &message, Sear
                       if (ulgrant.first.success) // WE GOT AN UPLINK MSG3 CANDIDATE
                         {
                           scheduleSuccessful = true;
+                          const uint16_t virtualCarrier = static_cast<uint16_t> (ulgrant.second.first);
+                          const uint16_t physicalCarrier = GetPhysicalCarrierFromVirtual (virtualCarrier);
+                          const uint16_t assignedRnti = rar->cellRnti;
+
                           rar->rarPayload.ulGrant = ulgrant.first;
-                          rar->rarPayload.ulGrant.subframes = ulgrant.second;
+                          rar->virtualId = virtualCarrier;
+                          rar->codebookId = GetCodebookFromVirtual (virtualCarrier);
+                          rar->rarPayload.ulGrant.subframes =
+                              std::make_pair (static_cast<uint8_t> (physicalCarrier),
+                                              ulgrant.second.second);
                           rar->rarPayload.ulGrant.tbs_size = size_mac_pdu;
+                          NS_LOG_INFO ("Scheduler Msg3 grant: RA-RNTI=" << message.ranti
+                                      << " RAPID=" << static_cast<uint32_t> (rar->rapId)
+                                      << " C-RNTI=" << assignedRnti
+                                      << " virtualCarrier=" << virtualCarrier
+                                      << " physicalCarrier=" << physicalCarrier
+                                      << " codebook=" << static_cast<uint32_t> (rar->codebookId)
+                                      << " toaValid=" << (rar->toaValid ? "1" : "0")
+                                      << " toaBin=" << rar->toaBin);
                           //NS_BUILD_DEBUG (std::cout << "Scheduling NPUSCH at ");
                           //NS_BUILD_DEBUG (std::cout << " Subcarrier " << ulgrant.second.first << " ");
                           for (size_t i = 0; i < ulgrant.second.second.size (); i++)
                             {
-                              m_uplink[ulgrant.second.first][ulgrant.second.second[i]] =
-                                  message.rnti;
-                                  //m_currenthyperindex;
+                              m_msg3UplinkVirtual[virtualCarrier][ulgrant.second.second[i]] =
+                                  assignedRnti;
+                              if (!m_newSchemaActivated)
+                                {
+                                  // Legacy mode keeps one physical UL owner per subframe.
+                                  m_uplink[physicalCarrier][ulgrant.second.second[i]] = assignedRnti;
+                                }
+                              // NewSchema mode tracks Msg3 occupancy on virtual carriers only.
+                              // Physical-layer overlap is intentionally allowed to emulate SCMA.
                                   
                               //NS_BUILD_DEBUG (std::cout << ulgrant.second.second[i] << " ");
                             }
                           //NS_BUILD_DEBUG (std::cout << std::endl);
                           ++rar;
-                          m_rntiUeConfigMap[rar->cellRnti].lastUl = ulgrant.second.second.back ();
+                          m_rntiUeConfigMap[assignedRnti].lastUl = ulgrant.second.second.back ();
                         }
                       else
                         {
@@ -800,25 +888,30 @@ NbiotScheduler::GetNextAvailableMsg3UlGrantCandidate (uint64_t endSubframeMsg2,
 {
   for (auto &i : m_Msg3TimeOffset)
     {
-      for (size_t j = 0; j < m_uplink.size (); ++j)
+      for (size_t j = 0; j < m_msg3UplinkVirtual.size (); ++j)
         {
           uint64_t candidate = endSubframeMsg2 +
                                NbIotRrcSap::UlGrant::ConvertUlGrantSchedulingDelay2int (i) +
                                1; // Start one subframe after delay
           std::vector<uint64_t> subframesOccupied =
-              GetUlSubframeRangeWithoutSystemResources (candidate, numSubframes, j);
+              GetUlSubframeRangeWithoutSystemResourcesVirtual (candidate, numSubframes, j);
           subframesOccupied =
-              CheckforNContiniousSubframesUl (subframesOccupied, candidate, numSubframes, j);
+              CheckforNContiniousSubframesUlVirtual (subframesOccupied, candidate, numSubframes, j);
           if (subframesOccupied.size () > 0)
             {
               NbIotRrcSap::UlGrant ret;
+              const uint16_t virtualCarrier = static_cast<uint16_t> (j);
+              const uint16_t physicalCarrier = GetPhysicalCarrierFromVirtual (virtualCarrier);
               ret.schedulingDelay = i;
               ret.msg3Repetitions = NbIotRrcSap::UlGrant::Msg3Repetitions::r4;
-              ret.subcarrierIndication = j;
+              // Keep virtual id in the grant for higher-layer tracing.
+              ret.subcarrierIndication = virtualCarrier;
               ret.Subcarrierspacing = 1;
               ret.success = true;
-              ret.subframes = std::make_pair (j, subframesOccupied);
-              return std::make_pair (ret, std::make_pair (j, subframesOccupied));
+              // The PHY still transmits over physical carriers [0..11].
+              ret.subframes = std::make_pair (static_cast<uint8_t> (physicalCarrier),
+                                              subframesOccupied);
+              return std::make_pair (ret, std::make_pair (virtualCarrier, subframesOccupied));
             }
         }
     }
@@ -913,6 +1006,27 @@ NbiotScheduler::GetUlSubframeRangeWithoutSystemResources (uint64_t overallSubfra
     }
   return subframeIndexes;
 }
+
+std::vector<uint64_t>
+NbiotScheduler::GetUlSubframeRangeWithoutSystemResourcesVirtual (uint64_t overallSubframeNo,
+                                                                 uint64_t numSubframes,
+                                                                 uint64_t carrier)
+{
+  std::vector<uint64_t> subframeIndexes;
+  size_t i = 0;
+  m_currenthyperindex = 1;
+  while (numSubframes > 0)
+    {
+      size_t currentindex = overallSubframeNo + i;
+      if ((m_msg3UplinkVirtual[carrier][currentindex] != -1))
+        {
+          subframeIndexes.push_back (currentindex);
+          numSubframes--;
+        }
+      i++;
+    }
+  return subframeIndexes;
+}
 std::vector<uint64_t>
 NbiotScheduler::CheckforNContiniousSubframesDl (std::vector<uint64_t> Subframes,
                                                 uint64_t StartSubframe, uint64_t N)
@@ -968,6 +1082,40 @@ NbiotScheduler::CheckforNContiniousSubframesUl (std::vector<uint64_t> Subframes,
   for (size_t i = 0; i < N; i++)
     {
       if (m_uplink[carrier][Subframes[startSubframeIndex + i]] > 0) // if > 0, then subframes are already used by user specific data
+        {
+          return std::vector<uint64_t> ();
+        }
+      else
+        {
+          range.push_back (Subframes[startSubframeIndex + i]);
+        }
+    }
+  return range;
+}
+
+std::vector<uint64_t>
+NbiotScheduler::CheckforNContiniousSubframesUlVirtual (std::vector<uint64_t> Subframes,
+                                                       uint64_t StartSubframe, uint64_t N,
+                                                       uint64_t carrier)
+{
+  int startSubframeIndex = -1;
+  std::vector<uint64_t> range;
+  for (size_t i = 0; i < Subframes.size (); ++i)
+    {
+      if (Subframes[i] == StartSubframe)
+        {
+          startSubframeIndex = i;
+          break;
+        }
+    }
+  if (startSubframeIndex == -1)
+    {
+      return std::vector<uint64_t> ();
+    }
+
+  for (size_t i = 0; i < N; i++)
+    {
+      if (m_msg3UplinkVirtual[carrier][Subframes[startSubframeIndex + i]] > 0)
         {
           return std::vector<uint64_t> ();
         }

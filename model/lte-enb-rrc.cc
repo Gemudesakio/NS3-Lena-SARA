@@ -55,6 +55,8 @@
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("LteEnbRrc");
+static uint64_t g_msg4TxCount = 0;
+static uint64_t g_msg5RxCount = 0;
 
 ///////////////////////////////////////////
 // CMAC SAP forwarder
@@ -1023,6 +1025,10 @@ UeManager::RecvRrcConnectionRequest (LteRrcSap::RrcConnectionRequest msg)
             msg2.radioResourceConfigDedicated = BuildRadioResourceConfigDedicated ();
 
             m_rrc->m_rrcSapUser->SendRrcConnectionSetup (m_rnti, msg2);
+            ++g_msg4TxCount;
+            NS_LOG_INFO ("[ENB][MSG4][TX] imsi=" << m_imsi
+                        << " c-rnti=" << m_rnti
+                        << " totalMsg4Tx=" << g_msg4TxCount);
 
             RecordDataRadioBearersToBeStarted ();
             m_connectionSetupTimeout = Simulator::Schedule (
@@ -1121,6 +1127,10 @@ UeManager::RecvRrcConnectionResumeRequestNb (NbIotRrcSap::RrcConnectionResumeReq
               msg2.rrcTransactionIdentifier = GetNewRrcTransactionIdentifier ();
               msg2.radioResourceConfigDedicated = BuildRadioResourceConfigDedicated ();
               m_rrc->m_rrcSapUser->SendRrcConnectionSetup (m_rnti, msg2);
+              ++g_msg4TxCount;
+              NS_LOG_INFO ("[ENB][MSG4][TX] imsi=" << m_imsi
+                          << " c-rnti=" << m_rnti
+                          << " totalMsg4Tx=" << g_msg4TxCount);
 
               RecordDataRadioBearersToBeStarted ();
               m_connectionSetupTimeout = Simulator::Schedule (
@@ -1190,6 +1200,10 @@ UeManager::RecvRrcEarlyDataRequestNb (NbIotRrcSap::RrcEarlyDataRequestNb msg)
               msg2.rrcTransactionIdentifier = GetNewRrcTransactionIdentifier ();
               msg2.radioResourceConfigDedicated = BuildRadioResourceConfigDedicated ();
               m_rrc->m_rrcSapUser->SendRrcConnectionSetup (m_rnti, msg2);
+              ++g_msg4TxCount;
+              NS_LOG_INFO ("[ENB][MSG4][TX] imsi=" << m_imsi
+                          << " c-rnti=" << m_rnti
+                          << " totalMsg4Tx=" << g_msg4TxCount);
 
               RecordDataRadioBearersToBeStarted ();
               m_connectionSetupTimeout = Simulator::Schedule (
@@ -1232,6 +1246,10 @@ UeManager::RecvRrcConnectionSetupCompleted (LteRrcSap::RrcConnectionSetupComplet
   switch (m_state)
     {
     case CONNECTION_SETUP:
+      ++g_msg5RxCount;
+      NS_LOG_INFO ("[ENB][MSG5][RX] imsi=" << m_imsi
+                  << " c-rnti=" << m_rnti
+                  << " totalMsg5Rx=" << g_msg5RxCount);
       m_rrc->m_cmacSapProvider.at(0)->NotifyConnectionSuccessful(m_rnti);
       m_connectionSetupTimeout.Cancel ();
       if ( m_caSupportConfigured == false && m_rrc->m_numberOfComponentCarriers > 1)
@@ -3873,4 +3891,3 @@ void LteEnbRrc::LogDataReception(uint32_t imsi){
         logfile.close();
 }
 } // namespace ns3
-
