@@ -39,6 +39,9 @@
 #include "nb-iot-data-volume-and-power-headroom-tag.h"
 #include "nb-iot-buffer-status-report-tag.h"
 #include "nb-iot-scma-msg3-tag.h"
+#include "nb-iot-msg3-imsi-tag.h"
+#include "sara-report.h"
+#include "sara-ul-id-tag.h"
 #include <ns3/ff-mac-common.h>
 #include <ns3/lte-control-messages.h>
 #include <ns3/simulator.h>
@@ -285,6 +288,11 @@ UeMemberLteUePhySapUser::NotifyAboutHarqOpportunity (
 //////////////////////////////////////////////////////////
 // LteUeMac methods
 ///////////////////////////////////////////////////////////
+void
+LteUeMac::SetImsi (uint64_t imsi)
+{
+  m_imsi = imsi;
+}
 
 TypeId
 LteUeMac::GetTypeId (void)
@@ -309,6 +317,21 @@ LteUeMac::GetTypeId (void)
                          UintegerValue (1),
                          MakeUintegerAccessor (&LteUeMac::m_toaToleranceBins),
                          MakeUintegerChecker<uint16_t> (0, 64))
+          .AddAttribute ("NbRaBackoffEnabled",
+                         "Enable random backoff before NB-IoT Msg1 retries after RAR timeout.",
+                         BooleanValue (false),
+                         MakeBooleanAccessor (&LteUeMac::m_nbRaBackoffEnabled),
+                         MakeBooleanChecker ())
+          .AddAttribute ("NbRaBackoffMinMs",
+                         "Minimum backoff in ms applied before NB-IoT Msg1 retries.",
+                         UintegerValue (0),
+                         MakeUintegerAccessor (&LteUeMac::m_nbRaBackoffMinMs),
+                         MakeUintegerChecker<uint16_t> (0, 10000))
+          .AddAttribute ("NbRaBackoffMaxMs",
+                         "Maximum backoff in ms applied before NB-IoT Msg1 retries.",
+                         UintegerValue (256),
+                         MakeUintegerAccessor (&LteUeMac::m_nbRaBackoffMaxMs),
+                         MakeUintegerChecker<uint16_t> (0, 10000))
           .AddTraceSource ("RaResponseTimeout", "trace fired upon RA response timeout",
                            MakeTraceSourceAccessor (&LteUeMac::m_raResponseTimeoutTrace),
                            "ns3::LteUeMac::RaResponseTimeoutTracedCallback")
@@ -351,6 +374,11 @@ LteUeMac::LteUeMac ()
   m_cmacSapProvider = new UeMemberLteUeCmacSapProvider (this);
   m_uePhySapUser = new UeMemberLteUePhySapUser (this);
   m_raPreambleUniformVariable = CreateObject<UniformRandomVariable> ();
+  m_raBackoffUniformVariable = CreateObject<UniformRandomVariable> ();
+  m_backoffParameter = 0;
+  m_nbRaBackoffEnabled = false;
+  m_nbRaBackoffMinMs = 0;
+  m_nbRaBackoffMaxMs = 256;
   m_componentCarrierId = 0;
   m_nextIsMsg5 = false;
   m_mac_logging = false;
@@ -447,6 +475,11 @@ LteUeMac::DoTransmitPdu (LteMacSapProvider::TransmitPduParameters params)
     m_nextIsMsg5 = true;
     dprTag.SetDataVolumeValue(dataVolumeIndex);
     params.pdu->AddPacketTag(dprTag);
+    // Carry UE identity with Msg3 so eNB can recover owner IMSI in legacy/new
+    // when RRCConnectionRequest identity is missing at receive side.
+    NbIotMsg3ImsiTag msg3ImsiTag;
+    msg3ImsiTag.SetImsi (m_imsi);
+    params.pdu->AddPacketTag (msg3ImsiTag);
 
     if (m_newSchemaActivated && m_pendingScmaMsg3Tag)
       {
@@ -462,12 +495,47 @@ LteUeMac::DoTransmitPdu (LteMacSapProvider::TransmitPduParameters params)
                     << " virtualId=" << m_pendingScmaVirtualId
                     << " codebook=" << static_cast<uint32_t> (m_pendingScmaCodebookId)
                     << " physicalCarrier=" << static_cast<uint32_t> (m_pendingScmaPhysicalCarrier));
+        if (SaraReport::IsEnabled ())
+          {
+            SaraReport::LogMsg3Ue (Simulator::GetContext (), m_imsi, params.rnti,
+                                   params.lcid, false, m_pendingScmaCodebookId, 0,
+                                   m_pendingScmaVirtualId, m_pendingScmaPhysicalCarrier, 1, 0);
+          }
+      }
+    else if (m_saraGroupActive)
+      {
+        Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+        uint8_t cd = rng->GetInteger (1, 6);
+        uint8_t dmrs = rng->GetInteger (1, 6);
+
+        SaraUlIdTag stag;
+        stag.Set (cd, dmrs);
+        params.pdu->AddPacketTag (stag);
+
+        NS_LOG_INFO ("[UE][MSG3][TAG-SARA] node=" << Simulator::GetContext ()
+                     << " imsi=" << m_imsi
+                     << " TC-RNTI=" << (uint32_t) params.rnti
+                     << " lcid=" << (uint32_t) params.lcid
+                     << " cd=" << (uint32_t) cd
+                     << " dmrs=" << (uint32_t) dmrs);
+        if (SaraReport::IsEnabled ())
+          {
+            SaraReport::LogMsg3Ue (Simulator::GetContext (), m_imsi, params.rnti,
+                                   params.lcid, true, cd, dmrs);
+          }
       }
     else
       {
-        NS_LOG_INFO ("[UE][MSG3][TX] imsi=" << m_imsi
-                    << " tc-rnti=" << params.rnti
-                    << " mode=legacy");
+        NS_LOG_INFO ("[UE][MSG3][NO-SARA] node=" << Simulator::GetContext ()
+                     << " imsi=" << m_imsi
+                     << " TC-RNTI=" << (uint32_t) params.rnti
+                     << " lcid=" << (uint32_t) params.lcid
+                     << " (sin cd/dmrs)");
+        if (SaraReport::IsEnabled ())
+          {
+            SaraReport::LogMsg3Ue (Simulator::GetContext (), m_imsi, params.rnti,
+                                   params.lcid, false, 0, 0);
+          }
       }
   }
   else{
@@ -571,19 +639,17 @@ LteUeMac::RandomlySelectAndSendRaPreamble ()
   bool contention = true;
   SendRaPreamble (contention);
 }
-
+//prepara mensaje 1 para NB-IoT
 void
 LteUeMac::RandomlySelectAndSendRaPreambleNb ()
 {
   NS_LOG_FUNCTION (this);
   // 3GPP 36.321 5.1.1
   NS_ASSERT_MSG (m_nprachConfigured, "NPRACH not configured");
-  // assume that there is no Random Access Preambles group B
+  //Se escoge de manera uniforme entre 12 subportadoras displnibles 
   m_raPreambleId = m_raPreambleUniformVariable->GetInteger (0, NbIotRrcSap::ConvertNprachNumSubcarriers2int (m_CeLevel) - 1);
   bool contention = true;
 
-  // NPRACH WINDOW STARTS at framenumber mod (NPRACH_PERIOD/10) = 0 (A Tutorial on NB-IoT Physical Layer Design, Mathhieu Kanj, et al.)
-  //uint32_t currentsubframe = (m_frameNo - 1)*10 +(m_subframeNo-1);
   uint32_t currentsubframe = Simulator::Now().GetMilliSeconds();
   uint16_t window_condition = ( currentsubframe/10) % (NbIotRrcSap::ConvertNprachPeriodicity2int (m_CeLevel) / 10);
   uint32_t lastPeriodStart = (currentsubframe/10) - window_condition;
@@ -609,6 +675,7 @@ LteUeMac::RandomlySelectAndSendRaPreambleNb ()
   }
 
 }
+
 void
 LteUeMac::SendRaPreamble (bool contention)
 {
@@ -625,12 +692,17 @@ LteUeMac::SendRaPreamble (bool contention)
   m_uePhySapProvider->SendRachPreamble (m_raPreambleId, m_raRnti);
   NS_LOG_INFO (this << " sent preamble id " << (uint32_t) m_raPreambleId << ", RA-RNTI "
                     << (uint32_t) m_raRnti);
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogMsg1 (Simulator::GetContext (), m_imsi, m_raPreambleId, m_raRnti);
+    }
   // 3GPP 36.321 5.1.4
   //Time raWindowBegin = MilliSeconds (3);
   //Time raWindowEnd = MilliSeconds (3 + m_rachConfig.raResponseWindowSize);
   //Simulator::Schedule (raWindowBegin, &LteUeMac::StartWaitingForRaResponse, this);
   //m_noRaResponseReceivedEvent = Simulator::Schedule (raWindowEnd, &LteUeMac::RaResponseTimeout, this, contention);
 }
+//envia mensaje 1 para NB-IoT
 void
 LteUeMac::SendRaPreambleNb (bool contention)
 {
@@ -638,33 +710,46 @@ LteUeMac::SendRaPreambleNb (bool contention)
 
   NS_ASSERT (m_frameNo > 0); // sanity check for subframe starting at 1
 
-  // ETSI 36.321 5.1.4
+  //Norma para calcular RA-RTNI ETSI 36.321 5.1.4
+  //la ecuacion garantiza que el raRnti se mantenga constante durante 4 subframes consecutivos, que es el numero de subframes entre dos ocasiones de nprach para un mismo CE level, necesario para que el UE pueda escuchar las search spaces correspondientes a su CE level durante toda la ventana de recepcion del RAR
   m_raRnti = 1 + floor (m_frameNo / 4);
 
+  //Cp estandar dado por la norma para nprach
   m_radioResourceConfig.nprachConfig.nprachCpLength =
       NbIotRrcSap::NprachConfig::NprachCpLength::us266dot7;
-  double ts = 1000.0 / (15000.0 * 2048.0);
-  double preambleSymbolTime = 8192.0 * ts;
-  double preambleGroupTimeNoCP = 5.0 * preambleSymbolTime;
+  //cada 15khz hay una subportadora, el simbolo de preambulo esta formado por 2048 subportadoras (IFFT), cada una lleva en si un simbolo M-ARIO, por lo que la frecuencia de muestreo es de 15khz*2048, y el tiempo de simbolo es el inverso de la frecuencia de muestreo
+  double ts = 1000.0 / (15000.0 * 2048.0); // duracion de una muestra en ms
+  double preambleSymbolTime = 8192.0 * ts; // duracion del simbolo nprach en 3.75khz 
+  double preambleGroupTimeNoCP = 5.0 * preambleSymbolTime; // el preambulo esta formado por 5 simbolos nprach
   double preambleGroupTime =
       NbIotRrcSap::ConvertNprachCpLenght2double (m_radioResourceConfig.nprachConfig) +
       preambleGroupTimeNoCP;
-  double preambleRepetition = 4.0 * preambleGroupTime;
-  double time = NbIotRrcSap::ConvertNumRepetitionsPerPreambleAttempt2int (m_CeLevel) *
-                                  preambleRepetition;
+  double preambleRepetition = 4.0 * preambleGroupTime; // el preambulo se repite 4 veces segun la norma para nprach
+  const uint16_t ceRepetitions =
+      NbIotRrcSap::ConvertNumRepetitionsPerPreambleAttempt2int (m_CeLevel);
+  double time = ceRepetitions * preambleRepetition; // repeticiones segun el nivel de covertura
   
   m_cmacSapUser->NotifyEnergyState(NbiotEnergyModel::PowerState::RRC_CONNECTED_SENDING_NPRACH);
   //Schedule EnergyStateChange on the next subframe after transmission
-  Simulator::Schedule (MilliSeconds (time+1), &LteUeCmacSapUser::NotifyEnergyState, m_cmacSapUser, NbiotEnergyModel::PowerState::RRC_CONNECTED_IDLE);
+  Simulator::Schedule (MilliSeconds (time+1), &LteUeCmacSapUser::NotifyEnergyState, m_cmacSapUser, NbiotEnergyModel::PowerState::RRC_CONNECTED_IDLE); // 1ms despues de enviar el preambulo se cambia a estado idle, que es el estado en el que el UE se queda escuchando el RAR durante la ventana de recepcion del RAR y se modela consumo de energia por estados sostenidos x tiempo
   Simulator::Schedule (MilliSeconds (time), &LteUePhySapProvider::SendNprachPreamble,
                        m_uePhySapProvider, m_raPreambleId, m_raRnti,
-                       NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel));
+                       NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel)); //se envia el preambulo a phy
   const uint16_t rapid =
-      static_cast<uint16_t> (NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) + m_raPreambleId);
+      static_cast<uint16_t> (NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) + m_raPreambleId); //offser para separar preambulos de diferentes niveles de covertua CE
   NS_LOG_INFO ("[UE][MSG1][TX] imsi=" << m_imsi
                << " preamble=" << static_cast<uint32_t> (m_raPreambleId)
                << " rapid=" << rapid
-               << " ra-rnti=" << static_cast<uint32_t> (m_raRnti));
+               << " ra-rnti=" << static_cast<uint32_t> (m_raRnti)
+               << " ceLevel=" << static_cast<uint32_t> (m_CeLevel.coverageEnhancementLevel)
+               << " ceRepetitions=" << ceRepetitions
+               << " nprachTxDurationMs=" << time);
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogMsg1 (
+          Simulator::GetContext (), m_imsi, m_raPreambleId, m_raRnti,
+          static_cast<int32_t> (m_CeLevel.coverageEnhancementLevel), static_cast<int32_t> (rapid));
+    }
 
   if (m_mac_logging)
   {
@@ -672,17 +757,18 @@ LteUeMac::SendRaPreambleNb (bool contention)
   }
 
   // 3GPP 36.321 5.1.4
+  //despues de enviar el preambulo se calcula la ventana de recepcion del RAR, que depende del nivel de cobertura CE, y se programa el timeout para el caso en el que no se reciba ningun RAR dentro de esa ventana
   Time raWindowBegin;
   Time raWindowEnd;
   uint32_t npdcchPeriod = NbIotRrcSap::ConvertNpdcchNumRepetitionsRa2int (m_CeLevel) *
-                          NbIotRrcSap::ConvertNpdcchStartSfCssRa2double (m_CeLevel);
+                          NbIotRrcSap::ConvertNpdcchStartSfCssRa2double (m_CeLevel); // tamaño del periodo entre inicios de bloques NPDCCH con el RAR, se calcula en funcion del tamaño del bloque (numero de repeticiones de subframe segun el (CE) y start que me dice cada cuanto tiempo inicia el siguiente bloque en relacion al tamaño del mismo 
 
   if (NbIotRrcSap::ConvertNumRepetitionsPerPreambleAttempt2int (m_CeLevel) >= 64)
     {
       raWindowBegin = MilliSeconds (41);
       //NS_BUILD_DEBUG(std::cout << (m_frameNo - 1) * 10 + (m_subframeNo - 1) + time + 41 + NbIotRrcSap::ConvertRaResponseWindowSize2int (m_rachConfigCe) * npdcchPeriod << std::endl);
       raWindowEnd = MilliSeconds (
-          time + 41 + NbIotRrcSap::ConvertRaResponseWindowSize2int (m_rachConfigCe) * npdcchPeriod);
+          time + 41 + NbIotRrcSap::ConvertRaResponseWindowSize2int (m_rachConfigCe) * npdcchPeriod); //calcula la cantidad total de subtramas que el ue debe esperar antes de dejar de escuchar npdcch
     }
   else
     {
@@ -694,10 +780,12 @@ LteUeMac::SendRaPreambleNb (bool contention)
   //Time raWindowEnd = MilliSeconds (4 + 8*10240);
   //Time raWindowEnd = MilliSeconds (4 + m_rachConfig.raResponseWindowSize);
   //NS_BUILD_DEBUG(std::cout << (m_frameNo - 1) * 10 + (m_subframeNo - 1) + time << std::endl);
-  Simulator::Schedule (raWindowBegin, &LteUeMac::StartWaitingForRaResponse, this);
+
+  //una vez calculada la ventana de recepcion de rar, se disparan los eventos
+  Simulator::Schedule (raWindowBegin, &LteUeMac::StartWaitingForRaResponse, this); //avisa a las capas inferiores phy que el ue quiere escuchar npdcch
   m_listenToSearchSpaces = true;
   m_noRaResponseReceivedEvent =
-      Simulator::Schedule (raWindowEnd, &LteUeMac::RaResponseTimeoutNb, this, contention);
+      Simulator::Schedule (raWindowEnd, &LteUeMac::RaResponseTimeoutNb, this, contention); // programa el timeout para el caso en el que no se reciba ningun RAR dentro de la ventana de recepcion
 }
 void
 LteUeMac::StartWaitingForRaResponse ()
@@ -761,6 +849,14 @@ LteUeMac::RecvRaResponseNb (NbIotRrcSap::Rar raResponse)
   NS_LOG_FUNCTION (this);
   m_waitingForRaResponse = false;
   m_noRaResponseReceivedEvent.Cancel ();
+  const uint32_t msg3GrantCount =
+      static_cast<uint32_t> (raResponse.rarPayload.ulGrant.subframes.second.size ());
+  const uint32_t msg3GrantFirst =
+      msg3GrantCount > 0 ? static_cast<uint32_t> (raResponse.rarPayload.ulGrant.subframes.second.front ())
+                         : 0;
+  const uint32_t msg3GrantLast =
+      msg3GrantCount > 0 ? static_cast<uint32_t> (raResponse.rarPayload.ulGrant.subframes.second.back ())
+                         : 0;
   NS_LOG_INFO ("[UE][MSG2][SELECT] imsi=" << m_imsi
                << " preamble=" << static_cast<uint32_t> (m_raPreambleId)
                << " tc-rnti=" << raResponse.rarPayload.cellRnti
@@ -769,7 +865,11 @@ LteUeMac::RecvRaResponseNb (NbIotRrcSap::Rar raResponse)
                << " virtualId=" << static_cast<uint32_t> (raResponse.virtualId)
                << " codebook=" << static_cast<uint32_t> (raResponse.codebookId)
                << " physicalCarrier="
-               << static_cast<uint32_t> (raResponse.rarPayload.ulGrant.subframes.first));
+               << static_cast<uint32_t> (raResponse.rarPayload.ulGrant.subframes.first)
+               << " msg3GrantCount=" << msg3GrantCount
+               << " msg3GrantFirst=" << msg3GrantFirst
+               << " msg3GrantLast=" << msg3GrantLast);
+
                                     
   if (m_mac_logging)
   {
@@ -791,9 +891,13 @@ LteUeMac::RecvRaResponseNb (NbIotRrcSap::Rar raResponse)
     {
       m_pendingScmaMsg3Tag = false;
     }
-  // RAR accepted by MAC: clear RA identifiers used in this attempt.
-  m_raPreambleId = 255;
-  m_raRnti = 11;
+  if (m_newSchemaActivated)
+    {
+      // In the new schema we clear RA identifiers right after RAR acceptance.
+      // Legacy/SARA keep original rc3 behavior.
+      m_raPreambleId = 255;
+      m_raRnti = 11;
+    }
   // in principle we should wait for contention resolution,
   // but in the current LTE model when two or more identical
   // preambles are sent no one is received, so there is no need
@@ -837,22 +941,28 @@ LteUeMac::RecvRaResponseNb (NbIotRrcSap::Rar raResponse)
       txOpParams.lcid = lc0Lcid;
       int subframes = raResponse.rarPayload.ulGrant.subframes.second.back() -
                       (10 * (m_frameNo - 1) + m_subframeNo - 1);
-      const uint8_t subcarrier = raResponse.rarPayload.ulGrant.subframes.first;
+      const bool scheduleMsg3FromMac = (m_newSchemaActivated || m_saraGroupActive);
+      if (scheduleMsg3FromMac)
+        {
+          const uint8_t subcarrier = raResponse.rarPayload.ulGrant.subframes.first;
+          // MAC owns the final RAR acceptance decision:
+          // - new: RAPID + ToA
+          // - SARA grouped: RAPID + tag
+          // Only now we program Msg3 UL resources in PHY.
+          m_uePhySapProvider->ScheduleNprachMsg3Transmission (
+              subcarrier,
+              static_cast<uint32_t> (std::max (0, subframes)));
 
-      // MAC owns the final RAR acceptance decision (RAPID + ToA). Only now we
-      // program Msg3 UL resources in PHY.
-      m_uePhySapProvider->ScheduleNprachMsg3Transmission (subcarrier,
-                                                          static_cast<uint32_t> (std::max (0, subframes)));
-
-      // Keep RSRP/CQI feedback tied to the accepted RAR only.
-      Ptr<DlCqiLteControlMessage> report = Create<DlCqiLteControlMessage> ();
-      CqiListElement_s dlcqi;
-      dlcqi.m_rnti = raResponse.rarPayload.cellRnti;
-      dlcqi.m_ri = 1;
-      dlcqi.m_cqiType = CqiListElement_s::P10;
-      report->SetDlCqi (dlcqi);
-      report->rsrp = m_uePhySapProvider->GetRSRP ();
-      m_uePhySapProvider->SendLteControlMessage (report);
+          // Keep RSRP/CQI feedback tied to the accepted RAR only.
+          Ptr<DlCqiLteControlMessage> report = Create<DlCqiLteControlMessage> ();
+          CqiListElement_s dlcqi;
+          dlcqi.m_rnti = raResponse.rarPayload.cellRnti;
+          dlcqi.m_ri = 1;
+          dlcqi.m_cqiType = CqiListElement_s::P10;
+          report->SetDlCqi (dlcqi);
+          report->rsrp = m_uePhySapProvider->GetRSRP ();
+          m_uePhySapProvider->SendLteControlMessage (report);
+        }
 
       uint32_t subframesTillNpusch = raResponse.rarPayload.ulGrant.subframes.second.front() - (10*(m_frameNo-1)+m_subframeNo-1);
 
@@ -906,6 +1016,12 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
   // and retries in the next CE level, until preambleTransMax is reached
   NS_LOG_FUNCTION (this << contention);
   m_waitingForRaResponse = false;
+  m_saraGroupActive = false;
+  m_saraGroupSize = 1;
+  m_saraTag = 0;
+  m_saraDesiredTagSet = false;
+  m_saraDesiredTag = 0;
+  m_saraWaitingForTag = false;
   //NS_BUILD_DEBUG(std::cout << "Window End" << std::endl);
   // 3GPP 36.321 5.1.4
   ++m_preambleTransmissionCounter;
@@ -926,7 +1042,7 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
       NbIotRrcSap::ConvertMaxNumPreambleAttemptCE2int (m_CeLevel)) // Max. number of retries in this CE level reached
         {
           m_preambleTransmissionCounterCe = 0;
-          NbIotRrcSap::NprachParametersNbR14 tmp; // needed if EDT is enabled
+          NbIotRrcSap::NprachParametersNbR14 tmp = {}; // needed if EDT is enabled
 
           if (m_CeLevel.coverageEnhancementLevel == m_radioResourceConfig.nprachConfig.nprachParametersList.nprachParametersNb0.coverageEnhancementLevel) // CE0
             {
@@ -974,19 +1090,55 @@ LteUeMac::RaResponseTimeoutNb (bool contention)
 
           }
         }
-      NS_LOG_INFO ("RAR timeout, re-send preamble");
+      uint16_t backoffMs = 0;
+      if (m_nbRaBackoffEnabled)
+        {
+          const uint16_t minBackoffMs = std::min<uint16_t> (m_nbRaBackoffMinMs, m_nbRaBackoffMaxMs);
+          const uint16_t maxBackoffMs = std::max<uint16_t> (m_nbRaBackoffMinMs, m_nbRaBackoffMaxMs);
+          if (minBackoffMs == maxBackoffMs)
+            {
+              backoffMs = minBackoffMs;
+            }
+          else
+            {
+              backoffMs = static_cast<uint16_t> (m_raBackoffUniformVariable->GetInteger (minBackoffMs, maxBackoffMs));
+            }
+        }
+      m_backoffParameter = backoffMs;
+      NS_LOG_INFO ("RAR timeout, re-send preamble"
+                   << " backoffMs=" << static_cast<uint32_t> (backoffMs));
       NS_LOG_INFO ("[UE][MSG1][RETRY] imsi=" << m_imsi
                   << " preambleTxCounter=" << static_cast<uint32_t> (m_preambleTransmissionCounter)
                   << " ceLevel="
-                  << static_cast<uint32_t> (m_CeLevel.coverageEnhancementLevel));
+                  << static_cast<uint32_t> (m_CeLevel.coverageEnhancementLevel)
+                  << " backoffMs=" << static_cast<uint32_t> (backoffMs));
       LogMessage("LteUeMac::RaResponseTimeoutNb,RAR timeout, re-send preamble");  
-      if (contention)
+      if (backoffMs == 0)
         {
-          RandomlySelectAndSendRaPreambleNb ();
+          if (contention)
+            {
+              RandomlySelectAndSendRaPreambleNb ();
+            }
+          else
+            {
+              SendRaPreambleNb (contention);
+            }
         }
       else
         {
-          SendRaPreambleNb (contention);
+          if (contention)
+            {
+              Simulator::Schedule (MilliSeconds (backoffMs),
+                                   &LteUeMac::RandomlySelectAndSendRaPreambleNb,
+                                   this);
+            }
+          else
+            {
+              Simulator::Schedule (MilliSeconds (backoffMs),
+                                   &LteUeMac::SendRaPreambleNb,
+                                   this,
+                                   contention);
+            }
         }
     }
 }
@@ -1014,6 +1166,12 @@ LteUeMac::DoStartContentionBasedRandomAccessProcedure ()
   NS_ASSERT_MSG (m_rachConfigured, "RACH not configured");
   m_preambleTransmissionCounter = 0;
   m_backoffParameter = 0;
+  m_saraGroupActive = false;
+  m_saraGroupSize = 1;
+  m_saraTag = 0;
+  m_saraDesiredTagSet = false;
+  m_saraDesiredTag = 0;
+  m_saraWaitingForTag = false;
   RandomlySelectAndSendRaPreamble ();
 }
 void
@@ -1026,11 +1184,17 @@ LteUeMac::DoStartRandomAccessProcedureNb (bool edt)
   m_preambleTransmissionCounter = 0;
   m_preambleTransmissionCounterCe = 0;
   m_edt = edt;
+  m_saraGroupActive = false;
+  m_saraGroupSize = 1;
+  m_saraTag = 0;
+  m_saraDesiredTagSet = false;
+  m_saraDesiredTag = 0;
+  m_saraWaitingForTag = false;
   // Check CE Level
   double rsrp = m_uePhySapProvider->GetRSRP ();
   //NS_BUILD_DEBUG (std::cout << "RSRP: " << rsrp << "dBm" << std::endl);
 
-  NbIotRrcSap::NprachParametersNbR14 tmp; // needed if EDT is enabled
+  NbIotRrcSap::NprachParametersNbR14 tmp = {}; // needed if EDT is enabled
 
   if (rsrp <= m_radioResourceConfig.nprachConfig.rsrpThresholdsPrachInfoList.ce2_lowerbound)
     {
@@ -1080,6 +1244,15 @@ LteUeMac::DoStartRandomAccessProcedureNb (bool edt)
   {
     LogMessage("StartRandomAccessProcedureNb");
   }
+
+  NS_LOG_INFO ("[UE][CE][SELECT] imsi=" << m_imsi
+               << " rsrp=" << rsrp
+               << " ceLevel="
+               << static_cast<uint32_t> (m_CeLevel.coverageEnhancementLevel)
+               << " ceRepetitions="
+               << NbIotRrcSap::ConvertNumRepetitionsPerPreambleAttempt2int (m_CeLevel)
+               << " maxPreambleAttemptsCe="
+               << NbIotRrcSap::ConvertMaxNumPreambleAttemptCE2int (m_CeLevel));
 
   RandomlySelectAndSendRaPreambleNb ();
 }
@@ -1454,14 +1627,14 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
                              << (uint32_t) m_raRnti);
           if (raRnti == m_raRnti) // RAR corresponds to TX subframe of preamble
             {
-              const uint8_t expectedRapid =
-                  static_cast<uint8_t> (NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) +
-                                        m_raPreambleId);
-              const uint32_t localMetaId = NbIotToaUtils::ToaMetaIdFromImsi (m_imsi);
-              const uint16_t localToaBin = NbIotToaUtils::ComputeToaBin (localMetaId, m_toaNumBins);
-              bool hasToaRarForRapid = false;
               if (m_newSchemaActivated)
                 {
+                  const uint8_t expectedRapid =
+                      static_cast<uint8_t> (NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) +
+                                            m_raPreambleId);
+                  const uint32_t localMetaId = NbIotToaUtils::ToaMetaIdFromImsi (m_imsi);
+                  const uint16_t localToaBin = NbIotToaUtils::ComputeToaBin (localMetaId, m_toaNumBins);
+                  bool hasToaRarForRapid = false;
                   for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
                        it != rarMsg->RarListEnd (); ++it)
                     {
@@ -1471,76 +1644,264 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
                           break;
                         }
                     }
+
+                  struct ToaMatchCandidate
+                  {
+                    const NbIotRrcSap::Rar* rar;
+                    uint16_t diff;
+                  };
+
+                  bool rarAccepted = false;
+                  std::vector<ToaMatchCandidate> toaMatchCandidates;
+                  for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
+                       it != rarMsg->RarListEnd (); ++it)
+                    {
+                      if (it->rapId != expectedRapid)
+                        {
+                          continue;
+                        }
+
+                      NS_LOG_INFO ("[UE][MSG2][RX] imsi=" << m_imsi
+                                  << " ra-rnti=" << static_cast<uint32_t> (rarMsg->GetRaRnti ())
+                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
+                                  << " tc-rnti=" << it->cellRnti
+                                  << " toaValid=" << (it->toaValid ? "1" : "0")
+                                  << " toaBin=" << static_cast<uint32_t> (it->toaBin)
+                                  << " virtualId=" << static_cast<uint32_t> (it->virtualId)
+                                  << " codebook=" << static_cast<uint32_t> (it->codebookId)
+                                  << " localToaBin=" << static_cast<uint32_t> (localToaBin));
+
+                      // Legacy fallback in new schema: no ToA-tagged RAR for this RAPID.
+                      if (!hasToaRarForRapid)
+                        {
+                          NS_LOG_INFO ("[UE][MSG2][ACCEPT] imsi=" << m_imsi
+                                      << " reason=legacy-first-match"
+                                      << " rapid=" << static_cast<uint32_t> (it->rapId)
+                                      << " tc-rnti=" << it->cellRnti
+                                      << " codebook=" << static_cast<uint32_t> (it->codebookId)
+                                      << " virtualId=" << static_cast<uint32_t> (it->virtualId));
+                          if (SaraReport::IsEnabled ())
+                            {
+                              SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, it->rapId,
+                                                         it->rarPayload.cellRnti, false, 0, 0,
+                                                         0, localToaBin, it->toaBin,
+                                                         it->virtualId, it->codebookId,
+                                                         1, 0);
+                            }
+                          RecvRaResponseNb (*it);
+                          rarAccepted = true;
+                          break;
+                        }
+
+                      if (!it->toaValid)
+                        {
+                          NS_LOG_INFO ("[UE][MSG2][REJECT] imsi=" << m_imsi
+                                      << " rapid=" << static_cast<uint32_t> (it->rapId)
+                                      << " reason=no-toa");
+                          if (SaraReport::IsEnabled ())
+                            {
+                              SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, it->rapId,
+                                                         it->rarPayload.cellRnti, false, 0, 0,
+                                                         0, localToaBin, it->toaBin,
+                                                         it->virtualId, it->codebookId,
+                                                         0, 1);
+                            }
+                          continue;
+                        }
+
+                      const uint16_t diff = (localToaBin >= it->toaBin) ? (localToaBin - it->toaBin)
+                                                                        : (it->toaBin - localToaBin);
+                      if (diff <= m_toaToleranceBins)
+                        {
+                          ToaMatchCandidate c;
+                          c.rar = &(*it);
+                          c.diff = diff;
+                          toaMatchCandidates.push_back (c);
+                        }
+                      else
+                        {
+                          NS_LOG_INFO ("[UE][MSG2][REJECT] imsi=" << m_imsi
+                                      << " reason=toa-mismatch"
+                                      << " rapid=" << static_cast<uint32_t> (it->rapId)
+                                      << " localToaBin=" << static_cast<uint32_t> (localToaBin)
+                                      << " rarToaBin=" << static_cast<uint32_t> (it->toaBin)
+                                      << " tolerance=" << static_cast<uint32_t> (m_toaToleranceBins));
+                          if (SaraReport::IsEnabled ())
+                            {
+                              SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, it->rapId,
+                                                         it->rarPayload.cellRnti, false, 0, 0,
+                                                         1, localToaBin, it->toaBin,
+                                                         it->virtualId, it->codebookId,
+                                                         0, 2);
+                            }
+                        }
+                    }
+
+                  if (!rarAccepted && hasToaRarForRapid && !toaMatchCandidates.empty ())
+                    {
+                      uint16_t bestDiff = toaMatchCandidates.front ().diff;
+                      for (std::vector<ToaMatchCandidate>::const_iterator c = toaMatchCandidates.begin ();
+                           c != toaMatchCandidates.end (); ++c)
+                        {
+                          if (c->diff < bestDiff)
+                            {
+                              bestDiff = c->diff;
+                            }
+                        }
+
+                      std::vector<const NbIotRrcSap::Rar*> bestMatches;
+                      for (std::vector<ToaMatchCandidate>::const_iterator c = toaMatchCandidates.begin ();
+                           c != toaMatchCandidates.end (); ++c)
+                        {
+                          if (c->diff == bestDiff)
+                            {
+                              bestMatches.push_back (c->rar);
+                            }
+                        }
+
+                      std::sort (bestMatches.begin (), bestMatches.end (),
+                                 [] (const NbIotRrcSap::Rar* a, const NbIotRrcSap::Rar* b)
+                                 {
+                                   if (a->toaBin != b->toaBin)
+                                     {
+                                       return a->toaBin < b->toaBin;
+                                     }
+                                   return a->cellRnti < b->cellRnti;
+                                 });
+
+                      const uint32_t tieSeed = localMetaId ^ (static_cast<uint32_t> (expectedRapid) * 2654435761u);
+                      const uint32_t tieIndex = bestMatches.empty () ? 0 : (tieSeed % bestMatches.size ());
+                      const NbIotRrcSap::Rar* chosen = bestMatches[tieIndex];
+
+                      NS_LOG_INFO ("[UE][MSG2][ACCEPT] imsi=" << m_imsi
+                                  << " reason=toa-best-match"
+                                  << " rapid=" << static_cast<uint32_t> (chosen->rapId)
+                                  << " localToaBin=" << static_cast<uint32_t> (localToaBin)
+                                  << " rarToaBin=" << static_cast<uint32_t> (chosen->toaBin)
+                                  << " tc-rnti=" << chosen->cellRnti
+                                  << " codebook=" << static_cast<uint32_t> (chosen->codebookId)
+                                  << " virtualId=" << static_cast<uint32_t> (chosen->virtualId)
+                                  << " tieCandidates=" << static_cast<uint32_t> (bestMatches.size ())
+                                  << " tieIndex=" << tieIndex);
+                      if (SaraReport::IsEnabled ())
+                        {
+                          SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, chosen->rapId,
+                                                     chosen->rarPayload.cellRnti, false, 0, 0,
+                                                     1, localToaBin, chosen->toaBin,
+                                                     chosen->virtualId, chosen->codebookId,
+                                                     1, 0);
+                        }
+                      RecvRaResponseNb (*chosen);
+                      rarAccepted = true;
+                    }
                 }
-
-              bool rarAccepted = false;
-              for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
-                   it != rarMsg->RarListEnd (); ++it)
+              else
                 {
-                  if (rarAccepted || (it->rapId != expectedRapid))
+                  uint8_t myRapid = NbIotRrcSap::ConvertNprachSubcarrierOffset2int (m_CeLevel) +
+                                    m_raPreambleId;
+                  bool processed = false;
+                  bool sawSaraForMyRapid = false;
+
+                  for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
+                       it != rarMsg->RarListEnd (); ++it)
                     {
-                      continue;
+                      if (it->rapId != myRapid)
+                        {
+                          continue;
+                        }
+
+                      if (it->saraGroup)
+                        {
+                          sawSaraForMyRapid = true;
+                          if (it->saraGroupSize > 0)
+                            {
+                              if (!m_saraDesiredTagSet)
+                                {
+                                  Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+                                  m_saraDesiredTag = rng->GetInteger (0, it->saraGroupSize - 1);
+                                  m_saraDesiredTagSet = true;
+                                }
+
+                              if (it->saraTag == m_saraDesiredTag)
+                                {
+                                  m_saraGroupActive = true;
+                                  m_saraGroupSize = it->saraGroupSize;
+                                  m_saraTag = it->saraTag;
+                                  m_saraWaitingForTag = false;
+
+                                  NS_LOG_INFO ("[UE][RAR][SELECT] node=" << Simulator::GetContext ()
+                                               << " imsi=" << m_imsi
+                                               << " RAPID=" << (uint32_t) myRapid
+                                               << " group=" << (uint32_t) m_saraGroupSize
+                                               << " tag=" << (uint32_t) m_saraTag);
+                                  if (SaraReport::IsEnabled ())
+                                    {
+                                      SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, it->rapId,
+                                                                 it->rarPayload.cellRnti, true,
+                                                                 it->saraGroupSize, it->saraTag,
+                                                                 -1, -1, -1, -1, -1,
+                                                                 1, 0);
+                                    }
+
+                                  RecvRaResponseNb (*it);
+                                  processed = true;
+                                  break;
+                                }
+                              else if (SaraReport::IsEnabled ())
+                                {
+                                  SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, it->rapId,
+                                                             it->rarPayload.cellRnti, true,
+                                                             it->saraGroupSize, it->saraTag,
+                                                             -1, -1, -1, -1, -1,
+                                                             0, 3);
+                                }
+                            }
+                        }
                     }
 
-                  NS_LOG_INFO ("[UE][MSG2][RX] imsi=" << m_imsi
-                              << " ra-rnti=" << static_cast<uint32_t> (rarMsg->GetRaRnti ())
-                              << " rapid=" << static_cast<uint32_t> (it->rapId)
-                              << " tc-rnti=" << it->cellRnti
-                              << " toaValid=" << (it->toaValid ? "1" : "0")
-                              << " toaBin=" << static_cast<uint32_t> (it->toaBin)
-                              << " virtualId=" << static_cast<uint32_t> (it->virtualId)
-                              << " codebook=" << static_cast<uint32_t> (it->codebookId)
-                              << " localToaBin=" << static_cast<uint32_t> (localToaBin));
-
-                  // Legacy path: accept first matching RAPID.
-                  if (!m_newSchemaActivated || !hasToaRarForRapid)
+                  if (processed)
                     {
-                      NS_LOG_INFO ("[UE][MSG2][ACCEPT] imsi=" << m_imsi
-                                  << " reason=legacy-first-match"
-                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
-                                  << " tc-rnti=" << it->cellRnti
-                                  << " codebook=" << static_cast<uint32_t> (it->codebookId)
-                                  << " virtualId=" << static_cast<uint32_t> (it->virtualId));
-                      RecvRaResponseNb (*it);
-                      rarAccepted = true; // accept only one RAR per RA attempt
-                      break;
+                      return;
                     }
 
-                  // New schema path: when ToA-tagged RAR exists for this RAPID,
-                  // accept only by local ToA match.
-                  if (!it->toaValid)
+                  if (sawSaraForMyRapid)
                     {
-                      NS_LOG_INFO ("[UE][MSG2][REJECT] imsi=" << m_imsi
-                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
-                                  << " reason=no-toa");
-                      continue;
+                      m_saraWaitingForTag = true;
+                      if (SaraReport::IsEnabled ())
+                        {
+                          SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, myRapid,
+                                                     0, true, m_saraGroupSize, m_saraDesiredTag,
+                                                     -1, -1, -1, -1, -1,
+                                                     0, 4);
+                        }
+                      return;
                     }
 
-                  if (NbIotToaUtils::MatchToa (localToaBin, it->toaBin, m_toaToleranceBins))
+                  for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
+                       it != rarMsg->RarListEnd (); ++it)
                     {
-                      NS_LOG_INFO ("[UE][MSG2][ACCEPT] imsi=" << m_imsi
-                                  << " reason=toa-match"
-                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
-                                  << " localToaBin=" << static_cast<uint32_t> (localToaBin)
-                                  << " rarToaBin=" << static_cast<uint32_t> (it->toaBin)
-                                  << " tc-rnti=" << it->cellRnti
-                                  << " codebook=" << static_cast<uint32_t> (it->codebookId)
-                                  << " virtualId=" << static_cast<uint32_t> (it->virtualId));
-                      RecvRaResponseNb (*it);
-                      rarAccepted = true; // accept only one RAR per RA attempt
-                      /// \todo RRC generates the RecvRaResponse messaged
-                      /// for avoiding holes in transmission at PHY layer
-                      /// (which produce erroneous UL CQI evaluation)
-                      break;
-                    }
-                  else
-                    {
-                      NS_LOG_INFO ("[UE][MSG2][REJECT] imsi=" << m_imsi
-                                  << " reason=toa-mismatch"
-                                  << " rapid=" << static_cast<uint32_t> (it->rapId)
-                                  << " localToaBin=" << static_cast<uint32_t> (localToaBin)
-                                  << " rarToaBin=" << static_cast<uint32_t> (it->toaBin)
-                                  << " tolerance=" << static_cast<uint32_t> (m_toaToleranceBins));
+                      if (it->rapId == myRapid)
+                        {
+                          m_saraGroupActive = false;
+                          m_saraGroupSize = 1;
+                          m_saraTag = 0;
+                          m_saraDesiredTagSet = false;
+                          m_saraDesiredTag = 0;
+                          m_saraWaitingForTag = false;
+
+                          NS_LOG_INFO ("[UE][RAR][SELECT] node=" << Simulator::GetContext ()
+                                       << " imsi=" << m_imsi
+                                       << " RAPID=" << (uint32_t) myRapid);
+                          if (SaraReport::IsEnabled ())
+                            {
+                              SaraReport::LogMsg2Select (Simulator::GetContext (), m_imsi, it->rapId,
+                                                         it->rarPayload.cellRnti, false, 0, 0,
+                                                         -1, -1, -1, -1, -1,
+                                                         1, 0);
+                            }
+                          RecvRaResponseNb (*it);
+                          break;
+                        }
                     }
                 }
             }
@@ -1572,6 +1933,25 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
     {
       Ptr<UlDciN0NbiotControlMessage> msg2 = DynamicCast<UlDciN0NbiotControlMessage> (msg);
       NbIotRrcSap::DciN0 dci = msg2->GetDci ();
+      const uint32_t npuschOppCount =
+          dci.npuschOpportunity.size () > 0
+              ? static_cast<uint32_t> (dci.npuschOpportunity[0].second.size ())
+              : 0;
+      const uint32_t npuschOppFirst =
+          npuschOppCount > 0
+              ? static_cast<uint32_t> (dci.npuschOpportunity[0].second.front ())
+              : 0;
+      const uint32_t npuschOppLast =
+          npuschOppCount > 0
+              ? static_cast<uint32_t> (dci.npuschOpportunity[0].second.back ())
+              : 0;
+      NS_LOG_INFO ("[UE][UL-DCI][RX] imsi=" << m_imsi
+                   << " rnti=" << m_rnti
+                   << " tbs=" << dci.tbs
+                   << " npuschOppCount=" << npuschOppCount
+                   << " npuschOppFirst=" << npuschOppFirst
+                   << " npuschOppLast=" << npuschOppLast
+                   << " ndi=" << (dci.NDI ? "1" : "0"));
 
       m_cmacSapUser->NotifyEnergyState(NbiotEnergyModel::PowerState::RRC_CONNECTED_IDLE);
 
@@ -1630,6 +2010,10 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
                 txOpParams.lcid = bsr->second.lcid;
                 //Simulator::Schedule (MilliSeconds (subframes), &LteMacSapUser::NotifyTxOpportunity,
                 //    (*lcidIt).second.macSapUser, txOpParams);
+                NS_LOG_INFO ("[UE][NPUSCH][TXOP] imsi=" << m_imsi
+                             << " lcid=" << static_cast<uint32_t> (txOpParams.lcid)
+                             << " bytes=" << txOpParams.bytes
+                             << " fromULDCI=1");
                 (*lcidIt).second.macSapUser->NotifyTxOpportunityNb(txOpParams,subframes);
                 bytesforallLc -= bsr->second.statusPduSize;
                 bsr->second.statusPduSize = 0;
@@ -1671,6 +2055,10 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
                     txOpParams.lcid = bsr->second.lcid;
                     //Simulator::Schedule (MilliSeconds (subframes), &LteMacSapUser::NotifyTxOpportunity,
                     //  (*lcidIt).second.macSapUser, txOpParams);
+                    NS_LOG_INFO ("[UE][NPUSCH][TXOP] imsi=" << m_imsi
+                                 << " lcid=" << static_cast<uint32_t> (txOpParams.lcid)
+                                 << " bytes=" << txOpParams.bytes
+                                 << " fromULDCI=1");
                     (*lcidIt).second.macSapUser->NotifyTxOpportunityNb(txOpParams,subframes);
                   }
                 else if (bsr->second.txQueueSize > 0)
@@ -1715,6 +2103,10 @@ LteUeMac::DoReceiveLteControlMessage (Ptr<LteControlMessage> msg)
 
                     //Simulator::Schedule (MilliSeconds (subframes), &LteMacSapUser::NotifyTxOpportunity,
                     //  (*lcidIt).second.macSapUser, txOpParams);
+                    NS_LOG_INFO ("[UE][NPUSCH][TXOP] imsi=" << m_imsi
+                                 << " lcid=" << static_cast<uint32_t> (txOpParams.lcid)
+                                 << " bytes=" << txOpParams.bytes
+                                 << " fromULDCI=1");
                     (*lcidIt).second.macSapUser->NotifyTxOpportunityNb(txOpParams,subframes);
                     
                   }
@@ -2034,7 +2426,8 @@ LteUeMac::AssignStreams (int64_t stream)
 {
   NS_LOG_FUNCTION (this << stream);
   m_raPreambleUniformVariable->SetStream (stream);
-  return 1;
+  m_raBackoffUniformVariable->SetStream (stream + 1);
+  return 2;
 }
 void 
 LteUeMac::DoNotifyEdrx(){

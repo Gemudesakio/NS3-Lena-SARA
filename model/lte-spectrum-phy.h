@@ -80,6 +80,8 @@ struct tbInfo_t
   bool downlink; ///< whether is downlink
   bool corrupt; ///< whether is corrupt
   bool harqFeedbackSent; ///< is HARQ feedback sent
+  Time expiry; ///< absolute time when this TB expectation expires
+  bool expirySet; ///< whether expiry is valid
 };
 
 typedef std::map<TbId_t, tbInfo_t> expectedTbs_t; ///< expectedTbs_t typedef
@@ -438,6 +440,7 @@ public:
   * \param downlink true when the TB is for DL
   */
   void AddExpectedTb (uint16_t  rnti, uint8_t ndi, uint16_t size, uint8_t mcs, std::vector<int> map, uint8_t layer, uint8_t harqId, uint8_t rv, bool downlink);
+  void SetExpectedTbExpiry (uint16_t rnti, uint8_t layer, Time expiry);
   /**
    * \brief Remove expected transport block.
    *
@@ -563,6 +566,7 @@ private:
   bool m_dataErrorModelEnabled; ///< when true (default) the phy error model is enabled
   bool m_ctrlErrorModelEnabled; ///< when true (default) the phy error model is enabled for DL ctrl frame
   bool m_interferenceEnabled; ///< when true (default) the phy error model is enabled for DL ctrl frame
+  bool m_extendedExpectedTbTracking; ///< keep expected TB state across bursts; rely on expiry/processed removal
   
   uint8_t m_transmissionMode; ///< for UEs: store the transmission mode
   uint8_t m_layersNum; ///< layers num

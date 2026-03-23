@@ -95,6 +95,11 @@ void
 NoOpComponentCarrierManager::DoReportBufferStatus (LteMacSapProvider::ReportBufferStatusParameters params)
 {
   NS_LOG_FUNCTION (this);
+  if (!m_ccmRrcSapUser->HasUeManager (params.rnti))
+    {
+      NS_LOG_WARN ("Ignoring late ReportBufferStatus for orphan RNTI=" << params.rnti);
+      return;
+    }
   auto ueManager = m_ccmRrcSapUser->GetUeManager (params.rnti);
   std::map <uint8_t, LteMacSapProvider*>::iterator it = m_macSapProvidersMap.find (ueManager->GetComponentCarrierId ());
   NS_ASSERT_MSG (it != m_macSapProvidersMap.end (), "could not find Sap for ComponentCarrier ");
@@ -105,6 +110,11 @@ void
 NoOpComponentCarrierManager::DoReportBufferStatusNb (LteMacSapProvider::ReportBufferStatusParameters params, NbIotRrcSap::NpdcchMessage::SearchSpaceType searchspace)
 {
   NS_LOG_FUNCTION (this);
+  if (!m_ccmRrcSapUser->HasUeManager (params.rnti))
+    {
+      NS_LOG_WARN ("Ignoring late ReportBufferStatusNb for orphan RNTI=" << params.rnti);
+      return;
+    }
   auto ueManager = m_ccmRrcSapUser->GetUeManager (params.rnti);
   if(ueManager){
   std::map <uint8_t, LteMacSapProvider*>::iterator it = m_macSapProvidersMap.find (ueManager->GetComponentCarrierId ());
@@ -117,6 +127,11 @@ NoOpComponentCarrierManager::DoReportBufferStatusNb (LteMacSapProvider::ReportBu
 void 
 NoOpComponentCarrierManager::DoReportNoTransmissionNb(uint16_t rnti, uint8_t lcid){
   NS_LOG_FUNCTION (this);
+  if (!m_ccmRrcSapUser->HasUeManager (rnti))
+    {
+      NS_LOG_WARN ("Ignoring late ReportNoTransmissionNb for orphan RNTI=" << rnti);
+      return;
+    }
   auto ueManager = m_ccmRrcSapUser->GetUeManager (rnti);
   std::map <uint8_t, LteMacSapProvider*>::iterator it = m_macSapProvidersMap.find (ueManager->GetComponentCarrierId ());
   NS_ASSERT_MSG (it != m_macSapProvidersMap.end (), "could not find Sap for ComponentCarrier ");
@@ -543,12 +558,22 @@ RrComponentCarrierManager::DoReportBufferStatus (LteMacSapProvider::ReportBuffer
 {
   NS_LOG_FUNCTION (this);
 
-  NS_ASSERT_MSG( m_enabledComponentCarrier.find(params.rnti)!=m_enabledComponentCarrier.end(), " UE with provided RNTI not found. RNTI:"<<params.rnti);
+  std::map<uint16_t, uint8_t>::const_iterator ccIt = m_enabledComponentCarrier.find (params.rnti);
+  if (ccIt == m_enabledComponentCarrier.end ())
+    {
+      NS_LOG_WARN ("Ignoring ReportBufferStatus for unknown RNTI=" << params.rnti);
+      return;
+    }
 
-  uint32_t numberOfCarriersForUe = m_enabledComponentCarrier.find (params.rnti)->second;
+  uint32_t numberOfCarriersForUe = ccIt->second;
   if (params.lcid == 0 || params.lcid == 1 || numberOfCarriersForUe == 1)
     {
       NS_LOG_INFO("Buffer status forwarded to the primary carrier.");
+      if (!m_ccmRrcSapUser->HasUeManager (params.rnti))
+        {
+          NS_LOG_WARN ("Ignoring RR ReportBufferStatus for orphan RNTI=" << params.rnti);
+          return;
+        }
       auto ueManager = m_ccmRrcSapUser->GetUeManager (params.rnti);
       m_macSapProvidersMap.at (ueManager->GetComponentCarrierId ())->ReportBufferStatus (params);
     }
@@ -573,7 +598,13 @@ RrComponentCarrierManager::DoUlReceiveMacCe (MacCeListElement_s bsr, uint8_t com
   NS_ASSERT_MSG (bsr.m_macCeType == MacCeListElement_s::BSR, "Received a Control Message not allowed " << bsr.m_macCeType);
 
   // split traffic in uplink equally among carriers
-  uint32_t numberOfCarriersForUe = m_enabledComponentCarrier.find(bsr.m_rnti)->second;
+  std::map<uint16_t, uint8_t>::const_iterator ccIt = m_enabledComponentCarrier.find (bsr.m_rnti);
+  if (ccIt == m_enabledComponentCarrier.end ())
+    {
+      NS_LOG_WARN ("Ignoring UL MAC CE for unknown RNTI=" << bsr.m_rnti);
+      return;
+    }
+  uint32_t numberOfCarriersForUe = ccIt->second;
 
   if ( bsr.m_macCeType == MacCeListElement_s::BSR)
     {
@@ -609,6 +640,11 @@ RrComponentCarrierManager::DoUlReceiveMacCe (MacCeListElement_s bsr, uint8_t com
     }
   else
     {
+      if (!m_ccmRrcSapUser->HasUeManager (bsr.m_rnti))
+        {
+          NS_LOG_WARN ("Ignoring UL MAC CE for orphan RNTI=" << bsr.m_rnti);
+          return;
+        }
       auto ueManager = m_ccmRrcSapUser->GetUeManager (bsr.m_rnti);
       m_ccmMacSapProviderMap.at (ueManager->GetComponentCarrierId ())->ReportMacCeToScheduler (bsr);
     }
@@ -620,7 +656,13 @@ RrComponentCarrierManager::DoUlReceiveSr(uint16_t rnti, uint8_t componentCarrier
   NS_LOG_FUNCTION (this);
   NS_UNUSED (componentCarrierId);
   // split traffic in uplink equally among carriers
-  uint32_t numberOfCarriersForUe = m_enabledComponentCarrier.find (rnti)->second;
+  std::map<uint16_t, uint8_t>::const_iterator ccIt = m_enabledComponentCarrier.find (rnti);
+  if (ccIt == m_enabledComponentCarrier.end ())
+    {
+      NS_LOG_WARN ("Ignoring UL SR for unknown RNTI=" << rnti);
+      return;
+    }
+  uint32_t numberOfCarriersForUe = ccIt->second;
 
   m_ccmMacSapProviderMap.find (m_lastCcIdForSr)->second->ReportSrToScheduler (rnti);
 

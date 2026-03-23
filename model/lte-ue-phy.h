@@ -35,6 +35,7 @@
 #include <ns3/lte-amc.h>
 #include <ns3/lte-ue-phy-sap.h>
 #include <ns3/lte-ue-cphy-sap.h>
+#include <ns3/nstime.h>
 #include <ns3/ptr.h>
 #include <ns3/lte-amc.h>
 #include <set>
@@ -686,6 +687,7 @@ private:
    */
   virtual void DoScheduleNprachMsg3Transmission (uint8_t subcarrier, uint32_t subframesDelay);
 
+  void AddNbiotExpectedTb(Time expiry);
   void AddNbiotExpectedTb();
   /// A list of sub channels to use in TX.
   std::vector <int> m_subChannelsForTransmission;
@@ -716,6 +718,10 @@ private:
    */
   Time m_a30CqiPeriodicity;
   Time m_a30CqiLast; ///< last aperiodic CQI
+
+  // If true, UE PHY forwards full RAR to MAC (ToA-based acceptance in MAC).
+  // If false, UE PHY keeps legacy/SARA behavior from rc3.
+  bool m_newSchemaActivated;
 
   LteUePhySapProvider* m_uePhySapProvider; ///< UE Phy SAP provider
   LteUePhySapUser* m_uePhySapUser; ///< UE Phy SAP user

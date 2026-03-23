@@ -239,6 +239,13 @@ NbiotScheduler::NbiotScheduler (std::vector<NbIotRrcSap::NprachParametersNb> ces
               (NbIotRrcSap::ConvertNumRepetitionsPerPreambleAttempt2int (*it) * preambleRepetition);
           size_t subcarrierOffset = NbIotRrcSap::ConvertNprachSubcarrierOffset2int (*it);
           uint8_t numberSubcarriers = NbIotRrcSap::ConvertNprachNumSubcarriers2int (*it);
+          const uint16_t physicalStart = static_cast<uint16_t> (subcarrierOffset / 4);
+          const uint16_t physicalSpan = static_cast<uint16_t> (numberSubcarriers / 4);
+          NS_ABORT_MSG_IF (physicalStart + physicalSpan > m_numPhysicalUlSubcarriers,
+                           "Invalid NPRACH CE config: subcarrierOffset="
+                               << static_cast<uint32_t> (subcarrierOffset)
+                               << ", numberSubcarriers=" << static_cast<uint32_t> (numberSubcarriers)
+                               << " exceeds compressed physical UL grid (12).");
           double time_tmp = uint64_t (nprachduration) + 1;
 
           for (size_t i = 0; i < m_uplink[0].size (); ++i)
@@ -254,6 +261,10 @@ NbiotScheduler::NbiotScheduler (std::vector<NbIotRrcSap::NprachParametersNb> ces
                       for (size_t k = 0; k < numberSubcarriers / 4; ++k)
                         {
                           const uint16_t physicalCarrier = subcarrierOffset / 4 + k;
+                          NS_ABORT_MSG_IF (physicalCarrier >= m_uplink.size (),
+                                           "Computed physicalCarrier out of bounds while reserving NPRACH: "
+                                               << physicalCarrier << " (uplink size=" << m_uplink.size ()
+                                               << ").");
                           m_uplink[physicalCarrier][i + j] = -1;
 
                           if (m_newSchemaActivated)
@@ -361,6 +372,61 @@ void
 NbiotScheduler::SetRntiRsrpMap (std::map<uint16_t, double> map)
 {
   m_rntiRsrpMap = map;
+}
+
+void
+NbiotScheduler::RegisterMsg4Context (uint16_t rnti, const Msg4Context &ctx)
+{
+  m_msg4ContextByRnti[rnti] = ctx;
+}
+
+void
+NbiotScheduler::InvalidateMsg4Context (uint16_t rnti)
+{
+  m_msg4ContextByRnti.erase (rnti);
+}
+
+bool
+NbiotScheduler::IsMsg4ContextActive (uint16_t rnti) const
+{
+  std::map<uint16_t, Msg4Context>::const_iterator it = m_msg4ContextByRnti.find (rnti);
+  return (it != m_msg4ContextByRnti.end ()) && it->second.active;
+}
+
+bool
+NbiotScheduler::IsMsg4ContextExpired (uint16_t rnti, uint64_t nowSubframe) const
+{
+  std::map<uint16_t, Msg4Context>::const_iterator it = m_msg4ContextByRnti.find (rnti);
+  if (it == m_msg4ContextByRnti.end () || !it->second.active)
+    {
+      return false;
+    }
+  return nowSubframe > it->second.deadlineSubframe;
+}
+
+bool
+NbiotScheduler::DropStaleMsg4Context (uint16_t rnti, uint64_t nowSubframe, const char *reason,
+                                      uint64_t candidateEndSubframe)
+{
+  std::map<uint16_t, Msg4Context>::const_iterator ctxIt = m_msg4ContextByRnti.find (rnti);
+  if (ctxIt == m_msg4ContextByRnti.end ())
+    {
+      return false;
+    }
+  NS_LOG_WARN ("[SCHED][MSG4][DROP-STALE] rnti=" << rnti
+               << " imsi=" << ctxIt->second.imsi
+               << " attempt=" << ctxIt->second.raAttemptId
+               << " nowSf=" << nowSubframe
+               << " deadlineSf=" << ctxIt->second.deadlineSubframe
+               << " candidateEndSf=" << candidateEndSubframe
+               << " reason=" << reason);
+  std::map<uint16_t, UeConfig>::iterator ueIt = m_rntiUeConfigMap.find (rnti);
+  if (ueIt != m_rntiUeConfigMap.end ())
+    {
+      ueIt->second.rlcDlBuffer = 0;
+    }
+  m_msg4ContextByRnti.erase (rnti);
+  return true;
 }
 
 void
@@ -505,6 +571,13 @@ NbiotScheduler::ScheduleNpdcchMessage (NbIotRrcSap::NpdcchMessage &message, Sear
 
   if (message.dciType == NbIotRrcSap::NpdcchMessage::DciType::n1)
     {
+      const uint64_t nowSubframe = 10 * (m_frameNo - 1) + (m_subframeNo - 1);
+      if (IsMsg4ContextExpired (static_cast<uint16_t> (message.rnti), nowSubframe))
+        {
+          DropStaleMsg4Context (static_cast<uint16_t> (message.rnti), nowSubframe,
+                                "deadline-before-searchspace");
+          return false;
+        }
       std::vector<uint64_t> test = GetNextAvailableSearchSpaceCandidate (
           message.rnti, m_frameNo - 1, m_subframeNo - 1, ssc.R_max,
           NbIotRrcSap::ConvertDciN1Repetitions2int (message.dciN1));
@@ -518,6 +591,19 @@ NbiotScheduler::ScheduleNpdcchMessage (NbIotRrcSap::NpdcchMessage &message, Sear
               *(test.end () - 1), m_minSchedulingDelayDci2Downlink, subframesNpdsch, ssc.R_max);
           if (npdschsubframes.size () > 0) // WE GOT A DOWNLINK CANDIDATE
             {
+              if (IsMsg4ContextActive (static_cast<uint16_t> (message.rnti)))
+                {
+                  std::map<uint16_t, Msg4Context>::const_iterator ctxIt =
+                      m_msg4ContextByRnti.find (static_cast<uint16_t> (message.rnti));
+                  const uint64_t npdschEnd = npdschsubframes.back ();
+                  if ((ctxIt != m_msg4ContextByRnti.end ()) &&
+                      (npdschEnd > ctxIt->second.deadlineSubframe))
+                    {
+                      DropStaleMsg4Context (static_cast<uint16_t> (message.rnti), nowSubframe,
+                                            "npdsch-end-after-deadline", npdschEnd);
+                      return false;
+                    }
+                }
               uint64_t subframesNpusch;
               std::pair<NbIotRrcSap::UlGrant, std::pair<uint64_t, std::vector<uint64_t>>> ulgrant;
               if (message.isRar)
@@ -577,44 +663,51 @@ NbiotScheduler::ScheduleNpdcchMessage (NbIotRrcSap::NpdcchMessage &message, Sear
                       if (ulgrant.first.success) // WE GOT AN UPLINK MSG3 CANDIDATE
                         {
                           scheduleSuccessful = true;
-                          const uint16_t virtualCarrier = static_cast<uint16_t> (ulgrant.second.first);
-                          const uint16_t physicalCarrier = GetPhysicalCarrierFromVirtual (virtualCarrier);
-                          const uint16_t assignedRnti = rar->cellRnti;
-
-                          rar->rarPayload.ulGrant = ulgrant.first;
-                          rar->virtualId = virtualCarrier;
-                          rar->codebookId = GetCodebookFromVirtual (virtualCarrier);
-                          rar->rarPayload.ulGrant.subframes =
-                              std::make_pair (static_cast<uint8_t> (physicalCarrier),
-                                              ulgrant.second.second);
-                          rar->rarPayload.ulGrant.tbs_size = size_mac_pdu;
-                          NS_LOG_INFO ("Scheduler Msg3 grant: RA-RNTI=" << message.ranti
-                                      << " RAPID=" << static_cast<uint32_t> (rar->rapId)
-                                      << " C-RNTI=" << assignedRnti
-                                      << " virtualCarrier=" << virtualCarrier
-                                      << " physicalCarrier=" << physicalCarrier
-                                      << " codebook=" << static_cast<uint32_t> (rar->codebookId)
-                                      << " toaValid=" << (rar->toaValid ? "1" : "0")
-                                      << " toaBin=" << rar->toaBin);
-                          //NS_BUILD_DEBUG (std::cout << "Scheduling NPUSCH at ");
-                          //NS_BUILD_DEBUG (std::cout << " Subcarrier " << ulgrant.second.first << " ");
-                          for (size_t i = 0; i < ulgrant.second.second.size (); i++)
+                          if (!m_newSchemaActivated)
                             {
-                              m_msg3UplinkVirtual[virtualCarrier][ulgrant.second.second[i]] =
-                                  assignedRnti;
-                              if (!m_newSchemaActivated)
+                              // Keep legacy/SARA branch byte-by-byte equivalent to rc3_sn4_v3.
+                              rar->rarPayload.ulGrant = ulgrant.first;
+                              rar->rarPayload.ulGrant.subframes = ulgrant.second;
+                              rar->rarPayload.ulGrant.tbs_size = size_mac_pdu;
+                              for (size_t i = 0; i < ulgrant.second.second.size (); i++)
                                 {
-                                  // Legacy mode keeps one physical UL owner per subframe.
-                                  m_uplink[physicalCarrier][ulgrant.second.second[i]] = assignedRnti;
+                                  m_uplink[ulgrant.second.first][ulgrant.second.second[i]] =
+                                      message.rnti;
                                 }
-                              // NewSchema mode tracks Msg3 occupancy on virtual carriers only.
-                              // Physical-layer overlap is intentionally allowed to emulate SCMA.
-                                  
-                              //NS_BUILD_DEBUG (std::cout << ulgrant.second.second[i] << " ");
+                              ++rar;
+                              m_rntiUeConfigMap[rar->cellRnti].lastUl = ulgrant.second.second.back ();
                             }
-                          //NS_BUILD_DEBUG (std::cout << std::endl);
-                          ++rar;
-                          m_rntiUeConfigMap[assignedRnti].lastUl = ulgrant.second.second.back ();
+                          else
+                            {
+                              const uint16_t virtualCarrier =
+                                  static_cast<uint16_t> (ulgrant.second.first);
+                              const uint16_t physicalCarrier =
+                                  GetPhysicalCarrierFromVirtual (virtualCarrier);
+                              const uint16_t assignedRnti = rar->cellRnti;
+
+                              rar->rarPayload.ulGrant = ulgrant.first;
+                              rar->virtualId = virtualCarrier;
+                              rar->codebookId = GetCodebookFromVirtual (virtualCarrier);
+                              rar->rarPayload.ulGrant.subframes =
+                                  std::make_pair (static_cast<uint8_t> (physicalCarrier),
+                                                  ulgrant.second.second);
+                              rar->rarPayload.ulGrant.tbs_size = size_mac_pdu;
+                              NS_LOG_INFO ("Scheduler Msg3 grant: RA-RNTI=" << message.ranti
+                                          << " RAPID=" << static_cast<uint32_t> (rar->rapId)
+                                          << " C-RNTI=" << assignedRnti
+                                          << " virtualCarrier=" << virtualCarrier
+                                          << " physicalCarrier=" << physicalCarrier
+                                          << " codebook=" << static_cast<uint32_t> (rar->codebookId)
+                                          << " toaValid=" << (rar->toaValid ? "1" : "0")
+                                          << " toaBin=" << rar->toaBin);
+                              for (size_t i = 0; i < ulgrant.second.second.size (); i++)
+                                {
+                                  m_msg3UplinkVirtual[virtualCarrier][ulgrant.second.second[i]] =
+                                      assignedRnti;
+                                }
+                              ++rar;
+                              m_rntiUeConfigMap[assignedRnti].lastUl = ulgrant.second.second.back ();
+                            }
                         }
                       else
                         {
@@ -751,9 +844,16 @@ NbiotScheduler::ScheduleSearchSpace (SearchSpaceConfig ssc)
   */
   SortBasedOnSelectedSchedulingAlgorithm (ssc);
   std::vector<uint16_t> test_tmp = m_searchSpaceRntiMap[ssc];
+  const uint64_t nowSubframe = 10 * (m_frameNo - 1) + (m_subframeNo - 1);
   for (std::vector<uint16_t>::iterator it = m_searchSpaceRntiMap[ssc].begin ();
        it != m_searchSpaceRntiMap[ssc].end ();)
     {
+      if (IsMsg4ContextExpired ((*it), nowSubframe))
+        {
+          DropStaleMsg4Context ((*it), nowSubframe, "expired-before-candidate");
+          ++it;
+          continue;
+        }
       NbIotRrcSap::NpdcchMessage dci_candidate;
       if (m_rntiUeConfigMap[(*it)].priority == UeConfig::SchedulePriority::DOWNLINK)
         {
@@ -764,7 +864,15 @@ NbiotScheduler::ScheduleSearchSpace (SearchSpaceConfig ssc)
               if (ScheduleNpdcchMessage (dci_candidate, ssc))
                 {
                   scheduledMessages.push_back (dci_candidate);
-                  m_rntiUeConfigMap[(*it)].rlcDlBuffer = 0;
+                  uint64_t bytesTx = dci_candidate.tbs / 8;
+                  if (bytesTx >= m_rntiUeConfigMap[(*it)].rlcDlBuffer)
+                    {
+                      m_rntiUeConfigMap[(*it)].rlcDlBuffer = 0;
+                    }
+                  else
+                    {
+                      m_rntiUeConfigMap[(*it)].rlcDlBuffer -= bytesTx;
+                    }
                   m_RoundRobinLastScheduled[ssc] = (*it);
                   m_rntiUeConfigMap[(*it)].priority = UeConfig::SchedulePriority::UPLINK;
                 }
@@ -818,7 +926,15 @@ NbiotScheduler::ScheduleSearchSpace (SearchSpaceConfig ssc)
               if (ScheduleNpdcchMessage (dci_candidate, ssc))
                 {
                   scheduledMessages.push_back (dci_candidate);
-                  m_rntiUeConfigMap[(*it)].rlcDlBuffer = 0;
+                  uint64_t bytesTx = dci_candidate.tbs / 8;
+                  if (bytesTx >= m_rntiUeConfigMap[(*it)].rlcDlBuffer)
+                    {
+                      m_rntiUeConfigMap[(*it)].rlcDlBuffer = 0;
+                    }
+                  else
+                    {
+                      m_rntiUeConfigMap[(*it)].rlcDlBuffer -= bytesTx;
+                    }
                   m_RoundRobinLastScheduled[ssc] = (*it);
                 }
             }
@@ -886,6 +1002,36 @@ std::pair<NbIotRrcSap::UlGrant, std::pair<uint64_t, std::vector<uint64_t>>>
 NbiotScheduler::GetNextAvailableMsg3UlGrantCandidate (uint64_t endSubframeMsg2,
                                                       uint64_t numSubframes)
 {
+  if (!m_newSchemaActivated)
+    {
+      for (auto &i : m_Msg3TimeOffset)
+        {
+          for (size_t j = 0; j < m_uplink.size (); ++j)
+            {
+              uint64_t candidate = endSubframeMsg2 +
+                                   NbIotRrcSap::UlGrant::ConvertUlGrantSchedulingDelay2int (i) + 1;
+              std::vector<uint64_t> subframesOccupied =
+                  GetUlSubframeRangeWithoutSystemResources (candidate, numSubframes, j);
+              subframesOccupied =
+                  CheckforNContiniousSubframesUl (subframesOccupied, candidate, numSubframes, j);
+              if (subframesOccupied.size () > 0)
+                {
+                  NbIotRrcSap::UlGrant ret;
+                  ret.schedulingDelay = i;
+                  ret.msg3Repetitions = NbIotRrcSap::UlGrant::Msg3Repetitions::r4;
+                  ret.subcarrierIndication = j;
+                  ret.Subcarrierspacing = 1;
+                  ret.success = true;
+                  ret.subframes = std::make_pair (j, subframesOccupied);
+                  return std::make_pair (ret, std::make_pair (j, subframesOccupied));
+                }
+            }
+        }
+      NbIotRrcSap::UlGrant ret;
+      ret.success = false;
+      return std::make_pair (ret, std::make_pair (uint64_t (), std::vector<uint64_t> ()));
+    }
+
   for (auto &i : m_Msg3TimeOffset)
     {
       for (size_t j = 0; j < m_msg3UplinkVirtual.size (); ++j)
@@ -1286,6 +1432,12 @@ NbiotScheduler::ScheduleDlRlcBufferReq (
         }
     }
 
+  const uint64_t nowSubframe = static_cast<uint64_t> (Simulator::Now ().GetMilliSeconds ());
+  if (IsMsg4ContextExpired (static_cast<uint16_t> (rnti), nowSubframe))
+    {
+      DropStaleMsg4Context (static_cast<uint16_t> (rnti), nowSubframe, "expired-on-enqueue");
+      return;
+    }
 
   m_rntiUeConfigMap[rnti].rlcDlBuffer = buffer_size;
   SearchSpaceConfig searchSpace = m_rntiUeConfigMap[rnti].searchSpaceConfig;
@@ -1324,6 +1476,33 @@ NbiotScheduler::AddToUlBufferReq (uint64_t rnti, uint64_t dataSize)
   }
 }
 
+void
+NbiotScheduler::CloneUeConfig (uint16_t srcRnti, uint16_t dstRnti)
+{
+  std::map<uint16_t, UeConfig>::const_iterator it = m_rntiUeConfigMap.find (srcRnti);
+  if (it == m_rntiUeConfigMap.end ())
+    {
+      return;
+    }
+
+  UeConfig cfg = it->second;
+  cfg.rnti = dstRnti;
+  cfg.rlcDlBuffer = 0;
+  cfg.rlcUlBuffer = 0;
+  cfg.lastUl = 0;
+  cfg.lastDl = 0;
+  m_rntiUeConfigMap[dstRnti] = cfg;
+
+  SearchSpaceConfig searchSpace = cfg.searchSpaceConfig;
+  std::vector<uint16_t>::iterator sit =
+      std::find (m_searchSpaceRntiMap[searchSpace].begin (),
+                 m_searchSpaceRntiMap[searchSpace].end (), dstRnti);
+  if (sit == m_searchSpaceRntiMap[searchSpace].end ())
+    {
+      m_searchSpaceRntiMap[searchSpace].push_back (dstRnti);
+    }
+}
+
 SearchSpaceConfig
 NbiotScheduler::ConvertNpdcchConfigDedicatedNb2SearchSpaceConfig (
     NbIotRrcSap::NpdcchConfigDedicatedNb configDedicated)
@@ -1350,6 +1529,7 @@ NbiotScheduler::ConvertNprachParametersNb2SearchSpaceConfig (NbIotRrcSap::Nprach
 void
 NbiotScheduler::RemoveUe (uint16_t rnti)
 {
+  InvalidateMsg4Context (rnti);
   if (m_rntiUeConfigMap.find (rnti) == m_rntiUeConfigMap.end ())
     {
       // Ue was not added to Scheduler

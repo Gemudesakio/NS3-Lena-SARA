@@ -38,9 +38,13 @@
 #include "lte-phy-tag.h"
 #include <ns3/lte-mi-error-model.h>
 #include <ns3/lte-radio-bearer-tag.h>
+#include <set>
 #include <ns3/boolean.h>
 #include <ns3/double.h>
 #include <ns3/config.h>
+
+#include "lte-rrc-header.h"
+#include "sara-report.h"
 
 namespace ns3 {
 
@@ -133,6 +137,7 @@ LteSpectrumPhy::LteSpectrumPhy ()
   : m_state (IDLE),
     m_cellId (0),
     m_componentCarrierId (0),
+    m_extendedExpectedTbTracking (false),
     m_transmissionMode (0),
     m_layersNum (1)
 {
@@ -256,6 +261,13 @@ LteSpectrumPhy::GetTypeId (void)
                     BooleanValue (false),
                     MakeBooleanAccessor (&LteSpectrumPhy::m_interferenceEnabled),
                     MakeBooleanChecker ())
+    .AddAttribute ("ExtendedExpectedTbTracking",
+                   "Keep expected TB entries across RX bursts and remove only processed/expired ones."
+                   " Recommended true for NB-IoT so NPDCCH->NPDSCH/NPUSCH offset windows are preserved,"
+                   " while expiry avoids stale expectations.",
+                   BooleanValue (false),
+                   MakeBooleanAccessor (&LteSpectrumPhy::m_extendedExpectedTbTracking),
+                   MakeBooleanChecker ())
     .AddTraceSource ("DlPhyReception",
                      "DL reception PHY layer statistics.",
                      MakeTraceSourceAccessor (&LteSpectrumPhy::m_dlPhyReception),
@@ -1138,8 +1150,22 @@ LteSpectrumPhy::AddExpectedTb (uint16_t  rnti, uint8_t ndi, uint16_t size, uint8
       m_expectedTbs.erase (it);
     }
   // insert new entry
-  tbInfo_t tbInfo = {ndi, size, mcs, map, harqId, rv, 0.0, downlink, false, false};
+  tbInfo_t tbInfo = {ndi, size, mcs, map, harqId, rv, 0.0, downlink, false, false, Time (), false};
   m_expectedTbs.insert (std::pair<TbId_t, tbInfo_t> (tbId,tbInfo));
+}
+
+void
+LteSpectrumPhy::SetExpectedTbExpiry (uint16_t rnti, uint8_t layer, Time expiry)
+{
+  TbId_t tbId;
+  tbId.m_rnti = rnti;
+  tbId.m_layer = layer;
+  expectedTbs_t::iterator it = m_expectedTbs.find (tbId);
+  if (it != m_expectedTbs.end ())
+    {
+      (*it).second.expiry = expiry;
+      (*it).second.expirySet = true;
+    }
 }
 
 void
@@ -1179,6 +1205,22 @@ LteSpectrumPhy::EndRxData ()
   }
   NS_LOG_DEBUG (this << " No. of burts " << m_rxPacketBurstList.size ());
   NS_LOG_DEBUG (this << " Expected TBs " << m_expectedTbs.size ());
+  // collect TBs actually present in this RX burst
+  std::set<TbId_t> rxTbIds;
+  for (std::list<Ptr<PacketBurst> >::const_iterator i = m_rxPacketBurstList.begin ();
+       i != m_rxPacketBurstList.end (); ++i)
+    {
+      for (std::list<Ptr<Packet> >::const_iterator j = (*i)->Begin (); j != (*i)->End (); ++j)
+        {
+          LteRadioBearerTag tag;
+          (*j)->PeekPacketTag (tag);
+          TbId_t tbId;
+          tbId.m_rnti = tag.GetRnti ();
+          tbId.m_layer = tag.GetLayer ();
+          rxTbIds.insert (tbId);
+        }
+    }
+
   expectedTbs_t::iterator itTb = m_expectedTbs.begin ();
   
   // apply transmission mode gain
@@ -1188,6 +1230,12 @@ LteSpectrumPhy::EndRxData ()
   
   while (itTb!=m_expectedTbs.end ())
     {
+      if (m_extendedExpectedTbTracking &&
+          (rxTbIds.find ((*itTb).first) == rxTbIds.end ()))
+        {
+          ++itTb;
+          continue;
+        }
       if ((m_dataErrorModelEnabled)&&(m_rxPacketBurstList.size ()>0)) // avoid to check for errors when there is no actual data transmitted
         {
           // retrieve HARQ info
@@ -1239,9 +1287,10 @@ LteSpectrumPhy::EndRxData ()
       
       itTb++;
     }
-    std::map <uint16_t, DlInfoListElement_s> harqDlInfoMap;
-    for (std::list<Ptr<PacketBurst> >::const_iterator i = m_rxPacketBurstList.begin (); 
-    i != m_rxPacketBurstList.end (); ++i)
+  std::map <uint16_t, DlInfoListElement_s> harqDlInfoMap;
+  std::set<TbId_t> processedTbs;
+  for (std::list<Ptr<PacketBurst> >::const_iterator i = m_rxPacketBurstList.begin (); 
+  i != m_rxPacketBurstList.end (); ++i)
       {
         for (std::list<Ptr<Packet> >::const_iterator j = (*i)->Begin (); j != (*i)->End (); ++j)
           {
@@ -1253,10 +1302,42 @@ LteSpectrumPhy::EndRxData ()
             tbId.m_layer = tag.GetLayer ();
             itTb = m_expectedTbs.find (tbId);
             NS_LOG_INFO (this << " Packet of " << tbId.m_rnti << " layer " <<  (uint16_t) tag.GetLayer ());
+
+            // Debug: trace exactly where Msg4 is dropped (or delivered) in the PHY chain.
+            bool isMsg4 = false;
+            uint64_t msg4Imsi = 0;
+            uint16_t msg4Crnti = tbId.m_rnti;
+            if (SaraReport::IsEnabled () && (tag.GetLcid () == 0))
+              {
+                Ptr<Packet> copy = (*j)->Copy ();
+                RrcDlCcchMessage dlMsg;
+                if ((copy->PeekHeader (dlMsg) != 0) && (dlMsg.GetMessageType () == 3))
+                  {
+                    RrcConnectionSetupHeader setupHdr;
+                    copy->RemoveHeader (setupHdr);
+                    LteRrcSap::RrcConnectionSetup setupMsg = setupHdr.GetMessage ();
+                    isMsg4 = true;
+                    msg4Imsi = setupMsg.ueIdentity;
+                    if (setupMsg.assignedRnti != 0)
+                      {
+                        msg4Crnti = setupMsg.assignedRnti;
+                      }
+                  }
+              }
             if (itTb!=m_expectedTbs.end ())
               {
+                if (m_extendedExpectedTbTracking)
+                  {
+                    processedTbs.insert (tbId);
+                  }
                 if (!(*itTb).second.corrupt)
                   {
+                    if (isMsg4)
+                      {
+                        // event=0: delivered OK
+                        SaraReport::LogMsg4PhyUe (Simulator::GetContext (), tbId.m_rnti, tag.GetLcid (),
+                                                 (*j)->GetUid (), msg4Imsi, msg4Crnti, 0);
+                      }
                     m_phyRxEndOkTrace (*j);
                 
                     if (!m_ltePhyRxDataEndOkCallback.IsNull ())
@@ -1266,6 +1347,12 @@ LteSpectrumPhy::EndRxData ()
                   }
                 else
                   {
+                    if (isMsg4)
+                      {
+                        // event=2: TB corrupt
+                        SaraReport::LogMsg4PhyUe (Simulator::GetContext (), tbId.m_rnti, tag.GetLcid (),
+                                                 (*j)->GetUid (), msg4Imsi, msg4Crnti, 2);
+                      }
                     // TB received with errors
                     m_phyRxEndErrorTrace (*j);
                   }
@@ -1339,6 +1426,17 @@ LteSpectrumPhy::EndRxData ()
                       } // end if ((*itTb).second.downlink) HARQ
                   } // end if (!(*itTb).second.harqFeedbackSent)
               }
+            else
+              {
+                // No expected TB: this happens when the UE did not decode the DCI/control for this RNTI,
+                // so EndRxData ignores the packet (it never reaches MAC/RRC).
+                if (isMsg4)
+                  {
+                    // event=1: dropped (no expected TB)
+                    SaraReport::LogMsg4PhyUe (Simulator::GetContext (), tbId.m_rnti, tag.GetLcid (),
+                                             (*j)->GetUid (), msg4Imsi, msg4Crnti, 1);
+                  }
+              }
           }
       }
 
@@ -1359,10 +1457,41 @@ LteSpectrumPhy::EndRxData ()
           m_ltePhyRxCtrlEndOkCallback (m_rxControlMessageList);
         }
     }
+  if (m_extendedExpectedTbTracking)
+    {
+      // remove TBs processed in this RX
+      for (std::set<TbId_t>::const_iterator it = processedTbs.begin (); it != processedTbs.end (); ++it)
+        {
+          expectedTbs_t::iterator itTbErase = m_expectedTbs.find (*it);
+          if (itTbErase != m_expectedTbs.end ())
+            {
+              m_expectedTbs.erase (itTbErase);
+            }
+        }
+
+      // remove expired expectations
+      const Time now = Simulator::Now ();
+      for (expectedTbs_t::iterator it = m_expectedTbs.begin (); it != m_expectedTbs.end (); )
+        {
+          if ((*it).second.expirySet && ((*it).second.expiry <= now))
+            {
+              it = m_expectedTbs.erase (it);
+            }
+          else
+            {
+              ++it;
+            }
+        }
+    }
+  else
+    {
+      // original legacy/newSchema behavior
+      m_expectedTbs.clear ();
+    }
+
   ChangeState (IDLE);
   m_rxPacketBurstList.clear ();
   m_rxControlMessageList.clear ();
-  m_expectedTbs.clear ();
 }
 
 

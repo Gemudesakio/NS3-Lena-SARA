@@ -29,7 +29,9 @@
 #define LTE_ENB_MAC_H
 
 
+#include <deque>
 #include <map>
+#include <set>
 #include <vector>
 #include <ns3/lte-common.h>
 #include <ns3/lte-mac-sap.h>
@@ -502,6 +504,10 @@ private:
   */
 
   void DoReportBufferStatusNb (LteMacSapProvider::ReportBufferStatusParameters params, NbIotRrcSap::NpdcchMessage::SearchSpaceType searchspace);
+  void DoMapTempRntiToDefRnti (uint16_t tempRnti, uint16_t assignedRnti);
+  void DoRegisterMsg4ValidityContext (uint16_t rnti,
+                                      const LteEnbCmacSapProvider::Msg4ValidityContext &ctx);
+  void DoInvalidateMsg4ValidityContext (uint16_t rnti);
 
   /**
   * \brief Subrame Indication function
@@ -532,10 +538,38 @@ private:
   void DoRemoveUeFromScheduler(uint16_t rnti);
   
   void DoSetLogDir(std::string logdir);
-  
+
+  struct Msg3BufferEntry
+  {
+    Ptr<Packet> p;
+    uint8_t lcid;
+    uint8_t codebook;
+  };
+
+  struct Msg3Buffer
+  {
+    std::vector<Msg3BufferEntry> entries;
+    EventId resolveEvent;
+  };
+
+  struct SharedFallbackMsg3Context
+  {
+    uint64_t windowEndSf;
+    bool firstAccepted;
+  };
+
+  void ResolveMsg3Window (uint16_t rnti, uint64_t windowEnd);
+  bool ForwardMsg3ToRlc (Ptr<Packet> p, uint16_t rnti, uint8_t lcid);
+  void CleanupExpiredSharedFallbackContexts (uint64_t nowSubframe);
 
   NbiotScheduler* m_schedulerNb = nullptr;
   std::map<uint16_t, uint32_t> m_rapIdRantiMap; ///< RAPID RNTI map
+  std::map<uint16_t, uint8_t> m_rntiToRapId; ///< T-CRNTI -> RAPID map
+  std::map<uint16_t, std::map<uint8_t, bool>> m_saraUlTags; ///< RNTI -> codebook usado
+  std::map<uint16_t, uint64_t> m_rntiMsg3WindowEnd; ///< RNTI -> última subtrama del grant Msg3
+  std::map<std::pair<uint16_t, uint64_t>, Msg3Buffer> m_msg3Buffers; ///< Buffer Msg3 por (RNTI, ventana)
+  std::map<uint16_t, std::deque<uint16_t>> m_tempRntiToDefRnti; ///< cola temp-RNTI -> C-RNTI
+  std::set<uint16_t> m_sharedFallbackBlockedRnti; ///< TC-RNTI bloqueados (RAR shared-fallback)
   std::map<uint32_t, NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel> m_RntiCeMap;
   std::map<uint16_t, bool> m_rapIdCollisionMap; // Used when contention resolution is involved
   std::map<uint8_t, std::map<uint8_t, uint32_t>> m_receivedNprachPreambleCount;
@@ -576,7 +610,8 @@ private:
   uint16_t m_toaToleranceBins;          // tolerancia de matching ToA
   uint64_t m_msg1RxCount;               // total Msg1 recibidos en eNB
   uint64_t m_msg2TxCount;               // total RAR (Msg2) transmitidos por eNB
-  uint64_t m_msg3RxCount;               // total Msg3 aceptados en eNB
+  uint64_t m_msg3RxCount;               // total Msg3 recibidos en eNB
+  uint64_t m_msg3AcceptedCount;         // total Msg3 aceptados/enviados a RLC
   uint64_t m_msg3DropCount;             // total Msg3 descartados en eNB
   uint64_t m_collisionRapidCount;       // total ocasiones con RAPID colisionado
   uint64_t m_collisionUeCount;          // suma de UEs detectados en RAPIDs colisionados
@@ -584,10 +619,16 @@ private:
   /*
   * --- Detector de colisiones (matriz de confusión), independiente del esquema ---
   */
-  double m_scmaTpr;                     // True Positive rate (p.ej. 0.975)
-  double m_scmaFpr;                     // False Positive rate (p.ej. 0.001)
-  uint8_t m_scmaMaxGroupSize;           // tamaño máximo de grupo (hito actual: 2)
-  Ptr<UniformRandomVariable> m_scmaRng; // RNG local para el detector
+  double m_collisionDetectorTpr;                  // True Positive rate (p.ej. 0.975)
+  double m_collisionDetectorFpr;                  // False Positive rate (p.ej. 0.001)
+  Ptr<UniformRandomVariable> m_collisionDetectorRng; // RNG común del detector
+  uint8_t m_scmaMaxGroupSize;                     // tamaño máximo de grupo (hito actual: 2)
+
+  /*
+  * --- SARA: activación y parámetros propios de agrupación ---
+  */
+  bool m_saraActivated;                 // OFF por defecto
+  uint8_t m_saraMaxGroupSize;           // Tamaño de grupo (primer hito: 2)
 
   struct NprachRxMeta
   {
@@ -611,6 +652,7 @@ private:
 
   std::map<uint16_t, std::vector<NprachRxMeta>> m_nprachRxMetaByRapid;
   std::map<uint16_t, ScmaMsg3ExpectedContext> m_expectedScmaMsg3ByTcRnti;
+  std::map<uint16_t, SharedFallbackMsg3Context> m_sharedFallbackMsg3ByTcRnti;
   uint16_t EstimateToaBinFromSender (uint32_t senderMetaId) const;
   std::vector<NprachRxMeta> SelectCollisionCandidates (uint16_t rapid, uint8_t maxCandidates) const;
   };

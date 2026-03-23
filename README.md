@@ -1,183 +1,298 @@
-LENA-NB + SARA (SCMA-Applied Random Access) — WIP
+# LENA-NB RA Lab (legacy / SARA / NEW)
 
-Este repositorio parte de LENA-NB (extensión NB-IoT de ns-3) y añade una implementación en curso de SARA en el procedimiento de acceso aleatorio (RA) para reproducir la simulación del paper SARA con cambios mínimos fuera de eNB-MAC.
+Guia operativa exacta del estado actual del repositorio.
 
-Estado del proyecto
+## 1) Alcance real del repositorio
 
-LENA-NB: características existentes (listadas abajo) ya integradas.
+Este repo Git tiene su raiz en `ns-3.32/src/lte`.
+No incluye el resto de `ns-3.32`.
 
-SARA: aún no implementado; este README define objetivos, puntos de integración y hoja de ruta. No se debe asumir funcionalidad SARA operativa hasta que los hitos estén marcados como completados.
+Implicacion practica:
 
-� LENA-NB (Narrowband)
+- Para ejecutar simulaciones, debes integrarlo dentro de un arbol `ns-3.32` funcional.
+- Si solo clonas este repo en una carpeta vacia, no compila por si solo.
 
-LENA-NB es una extensión NB-IoT para ns-3 (probada con ns-3.32). Actualmente incluye:
+Fuente en codigo:
 
-RRC Connection Resume (3GPP Rel. 13)
+- repo raiz detectada en `src/lte/.git`
+- modulo declarado en [wscript](wscript)
 
-Cellular IoT Optimization (3GPP Rel. 13)
+## 2) Dependencia Winner+
 
-Early Data Transmission (EDT) (3GPP Rel. 15)
+El ejemplo principal `rc1_sn2_example.cc` usa Winner+ de forma obligatoria.
 
-Cross-Subframe Scheduling
+Pruebas en codigo:
 
-Adaptive Modulation and Coding
+- include directo: [examples/rc1_sn2_example.cc](examples/rc1_sn2_example.cc)
+- set de pathloss fijo a Winner+: [examples/rc1_sn2_example.cc](examples/rc1_sn2_example.cc)
 
-NB-IoT Energy State Machine
+### 2.1 Esta dependencia viene dentro de este repo?
 
-Nota: No se usa por defecto un modelo de error específico NB-IoT. Se emplea una lookup table derivada de simulaciones MATLAB NB-IoT BLER para mapear SNR→config UL/DL con BLER objetivo. En trabajos futuros se integrará un modelo de error NB-IoT nativo.
+No. Este repo `src/lte` no contiene `winner-plus-propagation-loss-model.*`.
 
-Publicaciones que usan LENA-NB
+### 2.2 Donde debe existir Winner+
 
-P. Jörke, T. Gebauer, and C. Wietfeld, “From LENA to LENA-NB…”, WNS3 ‘22, pp. 73–80.
+Debe existir en el arbol `ns-3.32/src/propagation`:
 
-P. Jörke, T. Gebauer, S. Böcker, and C. Wietfeld, “Scaling Dense NB-IoT…”, VTC2022-Spring.
+- `src/propagation/model/winner-plus-propagation-loss-model.h`
+- `src/propagation/model/winner-plus-propagation-loss-model.cc`
+- entrada en `src/propagation/wscript`
 
-P. Jörke, D. Ronschka, and C. Wietfeld, “Performance Evaluation of Random Access…”, VTC2023-Spring.
+En el entorno actual SI existe:
 
-M. Štůsek et al., “Exploiting NB-IoT Network Performance…”, ICUMT 2023.
+- `src/propagation/model/winner-plus-propagation-loss-model.*`
+- `src/propagation/wscript` incluye esos archivos.
 
-M.T. Abbas et al., “Evaluating the Impact of Pre-Configured Uplink Resources…”, Sensors 2024.
+### 2.3 Como verificar rapidamente
 
-P. Masek et al., “Quantifying NB-IoT Performance in 5G Use-Cases…”, IEEE IoT Journal.
+Desde `ns-3.32`:
 
-Si usas este código/resultados, cita el trabajo en la sección Citation. Si falta tu publicación, envía PR.
+```bash
+test -f src/propagation/model/winner-plus-propagation-loss-model.h && echo "winner header: OK"
+test -f src/propagation/model/winner-plus-propagation-loss-model.cc && echo "winner source: OK"
+rg -n "winner-plus-propagation-loss-model" src/propagation/wscript
+```
 
-Uso de LENA-NB (ns-3.32)
+Si falta, integra el modulo Winner+ en `src/propagation` antes de compilar.
 
-Recomendado con ns-3 release 3.32 para evitar incompatibilidades. Tras compilar ns-3, sustituye src/lte por el provisto en este repo. (Actualmente LENA-NB reemplaza LTE; en el futuro se planea coexistencia.)
+## 3) Clonado e integracion
 
-Ejemplo incluido: src/lte/examples/lena-nb-5G-scenario.cc
-Parámetros esperados:
+### 3.1 Paso 1: preparar base ns-3.32
 
---simTime       # Tiempo a simular (ms)
---randomSeed    # Semilla RNG
---numUeAppA     # Nº UEs app A
---numUeAppB     # Nº UEs app B
---numUeAppC     # Nº UEs app C
---ciot          # Habilitar Cellular IoT Optimization
---edt           # Habilitar Early Data Transmission
+Debes tener un arbol `ns-3.32` operativo.
 
+### 3.2 Paso 2: reemplazar `src/lte`
 
-Topología por defecto: UEs uniformes en disco de 2500 m; cada UE transmite 1 vez/día (49 bytes por app en el ejemplo; ajustable).
+Desde `ns-3.32/src`:
 
-Modelo de propagación adicional:
-Este repo puede usar Winner+: https://github.com/tudo-cni/ns3-propagation-winner-plus
- (añádelo para builds exitosos si tu escenario lo requiere).
+```bash
+rm -rf lte
+git clone <TU_REPO_GITHUB> lte
+```
 
-Nota sobre tiempo real de simulación
+### 3.3 Paso 3: validar Winner+
 
-La simulación efectiva es 3×simTime (warm-up, ventana principal, cool-down) para estabilizar interferencia/carga y permitir completar transmisiones en curso.
+Ejecuta las validaciones de la seccion 2.3.
 
-Simulaciones automatizadas
+### 3.4 Paso 4: compilar
 
-Script runner_example.py para ejecutar múltiples semillas/configuraciones (cola de tareas, reintentos automáticos, num_workers para paralelismo; cuidado con RAM).
+Desde `ns-3.32`:
 
-*Compilación y logs (desarrollo)
-# Recomendado en desarrollo:
-./waf -d debug configure --enable-modules=lte --disable-python --disable-werror
+```bash
+./waf -d optimized configure --enable-examples --enable-modules=lte --disable-python
 ./waf build -j"$(nproc)"
+```
 
-# Logs útiles
-export NS_LOG="LteEnbMac=level_debug|prefix_time|prefix_node;LteEnbPhy=level_info;LteEnbRrc=level_info"
+Este flujo fue validado en este entorno.
 
-# Ejecutar ejemplo
-./waf --run "lena-nb-5G-scenario"
+### 3.5 Paso 5: smoke test
 
-*Extensión SARA — Implementación en curso (WIP)
+```bash
+./waf --run "rc1_sn2_example --PrintHelp"
+./waf --run "rc1_sn2_example --stopMs=6000 --populationPreset=avg --trafficProfile=10m --maxArrivals=20 --raMode=new --report=false"
+```
 
-Objetivo: reproducir fielmente el flujo del paper SARA en RA NB-IoT:
+## 4) Escenario principal y comandos
 
-RAR (Msg2) de colisión “estilo SARA”: un único TC-RNTI por RAPID colisionado, flag de grupo SARA, y anuncio de pools {codebooks (J), DMRS (D)} para Msg3.
+Ejemplo principal:
 
-Msg3 multi-UE: cada UE del grupo elige aleatoriamente (equiprobable) un par (codebook, DMRS) del pool y transmite simultáneamente.
+- [examples/rc1_sn2_example.cc](examples/rc1_sn2_example.cc)
 
-Detección ciega + separación: éxito si difieren en codebook o DMRS; fallo solo si hay triple coincidencia (preambulo + codebook + DMRS).
+Comando base:
 
-Msg4 “broadcast”: un solo mensaje al TC-RNTI común con lista (Random40b → nuevo C-RNTI) para cada UE decodificado.
+```bash
+./waf --run "rc1_sn2_example"
+```
 
-Alcance y puntos de integración (plan)
+Comando con parametros:
 
-eNB-MAC (lte-enb-mac.cc)
+```bash
+./waf --run "rc1_sn2_example --raMode=sara --stopMs=25000 --populationPreset=high --trafficProfile=2h --maxArrivals=500 --report=true"
+```
 
-Atributo ActivateSara (on/off).
+## 5) Parametros CLI de `rc1_sn2_example`
 
-Corrección RAR huérfano en colisión: encolar y agendar el RAR único con flag SARA + {J, D}.
+Fuente de verdad:
 
-Estado para reconocer TC-RNTIs de grupo y conteo de Msg3 por TTI (telemetría).
+- definicion y defaults: [examples/rc1_sn2_example.cc](examples/rc1_sn2_example.cc)
+- ayuda runtime: `--PrintHelp`
 
-Modelado de detección ciega (DMRS) y aceptación de múltiples Msg3 en un mismo grant/TTI (entrega a RLC/RRC).
+| Parametro | Default | Para que sirve | Valores / notas |
+|---|---:|---|---|
+| `--numUe` | `10` | Valor inicial de UEs creados | En este ejemplo luego se sobrescribe por llegadas de `phase2` |
+| `--cellRadius` | `9000` | Radio de celda (m) para distribuir UEs en disco | `double > 0` recomendado |
+| `--stopMs` | `2000` | Tiempo total de simulacion (ms) | Debe ser `> phase2StartOffsetMs` |
+| `--raMode` | `sara` | Esquema RA | `legacy`, `sara`, `new` |
+| `--rngSeed` | `12345` | Semilla global RNG | Entero |
+| `--rngRun` | `1` | Run global RNG | Entero |
+| `--enableVerboseLogs` | `false` | Activa logs INFO de RRC/MAC | `true/false` |
+| `--report` | `true` | Activa CSVs de `SaraReport` | `true/false` |
+| `--reportPrefix` | `""` | Prefijo de archivos de reporte | Si vacio usa `<modo>_report` |
+| `--reportDir` | `../reportes` | Carpeta base para reportes | Relativa al cwd de ejecucion |
+| `--reportRunId` | `""` | Nombre subcarpeta de corrida | Si vacio se autogenera con fecha |
+| `--collisionTpr` | `0.975` | TPR detector de colisiones (new/sara) | Rango `[0,1]` |
+| `--collisionFpr` | `0.001` | FPR detector de colisiones (new/sara) | Rango `[0,1]` |
+| `--nbRaBackoffEnabled` | `true` | Habilita backoff en reintentos Msg1 | `true/false` |
+| `--nbRaBackoffMinMs` | `0` | Backoff minimo Msg1 (ms) | Debe ser `<= nbRaBackoffMaxMs` |
+| `--nbRaBackoffMaxMs` | `256` | Backoff maximo Msg1 (ms) | Debe ser `>= nbRaBackoffMinMs` |
+| `--connReqTimeoutMs` | `50000` | Timeout eNB para esperar `RRCConnectionRequest` | maximo 50000 ms por checker del atributo |
+| `--connSetupTimeoutMs` | `240000` | Timeout eNB para esperar `RRCConnectionSetupComplete` | sin tope en CLI del ejemplo |
+| `--populationPreset` | `avg` | Poblacion virtual del trafico phase2 | `avg`, `high`, `ultra`, `custom` |
+| `--trafficProfile` | `2h` | Perfil temporal por UE | `2h`, `10m`, `custom` |
+| `--customPopulation` | `0` | Poblacion si `populationPreset=custom` | Debe ser `>0` en custom |
+| `--customPeriodSeconds` | `0` | Periodo medio (s) si `trafficProfile=custom` | Debe ser `>0` en custom |
+| `--maxArrivals` | `0` | Tope de llegadas en phase2 | `0` significa ilimitado por horizonte |
+| `--phase2StartOffsetMs` | `3000` | Offset antes de empezar Attach masivo | Debe ser `< stopMs` |
+| `--enbTxPowerDbm` | `43` | Potencia TX DL del eNB (dBm) | afecta RSRP y CE |
 
-eNB-PHY (lte-enb-phy.cc)
+## 6) Modelo de trafico phase2 (Poisson agregado)
 
-Atributo SaraMaxUlTbPerGrant (N): preparar el receptor para N TB UL en el mismo TTI por grant (permitir múltiples PhyPduReceived(...) en ese TTI).
+Fuente:
 
-eNB-RRC (lte-enb-rrc.cc)
+- [helper/nb-iot-traffic-helper.cc](helper/nb-iot-traffic-helper.cc)
+- uso en [examples/rc1_sn2_example.cc](examples/rc1_sn2_example.cc)
 
-Acumular múltiples Random40b bajo el mismo TC-RNTI.
+Logica exacta:
 
-Construir Msg4 broadcast con pares (Random40b, nuevo C-RNTI).
+1. Se resuelve poblacion virtual:
+- `avg = 52500`
+- `high = 200000`
+- `ultra = 500000`
+- `custom = customPopulation`
 
-UEs: inicialmente sin cambios funcionales; si el RAR trae flag SARA, se modelará (desde eNB) la elección aleatoria uniforme de (codebook, DMRS) para Msg3.
+2. Se resuelve periodo por UE:
+- `2h = 7200 s`
+- `10m = 600 s`
+- `custom = customPeriodSeconds`
 
-Parámetros SARA previstos
-Parámetro	Ámbito	Descripción
-ActivateSara (bool)	eNB-MAC	Activa/desactiva toda la lógica SARA.
-SaraCodebookPoolSize (J)	eNB-MAC	Tamaño del pool de codebooks SCMA por RAPID.
-SaraDmrsPoolSize (D)	eNB-MAC	Tamaño del pool de secuencias DMRS por RAPID.
-SaraPreambleDetectionProb (0..1)	eNB-MAC	Probabilidad de detección de preámbulo (modelado).
-SaraMaxUlTbPerGrant (N)	eNB-PHY	Nº máx. de PDUs UL esperados en el mismo TTI/grant.
+3. Tasa agregada:
+- `lambda = population / periodSeconds`
 
-Activación (cuando esté implementado):
+4. Llegadas:
+- inter-arrivals ~ Exponencial con `mean = 1/lambda`
+- se generan eventos hasta `horizonSeconds`
+- `horizonSeconds = (stopMs - phase2StartOffsetMs)/1000`
+- si `maxArrivals > 0`, aplica tope duro de llegadas
 
-Config::SetDefault("ns3::LteEnbMac::ActivateSara", BooleanValue(true));
-Config::SetDefault("ns3::LteEnbMac::SaraCodebookPoolSize", UintegerValue(6)); // J
-Config::SetDefault("ns3::LteEnbMac::SaraDmrsPoolSize",     UintegerValue(8)); // D
-Config::SetDefault("ns3::LteEnbMac::SaraPreambleDetectionProb", DoubleValue(0.9));
-Config::SetDefault("ns3::LteEnbPhy::SaraMaxUlTbPerGrant",  UintegerValue(2));
+5. Numero final de UEs creados/attach:
+- `numUe = arrivalTimesSeconds.size()`
+- por eso `--numUe` no manda cuando phase2 esta activo (que es el caso actual)
 
-Hoja de ruta (milestones)
+## 7) Configuracion fija del ejemplo (no expuesta por CLI)
 
-M0 — Andamiaje: atributos/flags (sin cambiar comportamiento por defecto).
+Fuente:
 
-M1 — RAR colisión operativo: encolar/agendar RAR único con flag SARA + {J, D}.
+- [examples/rc1_sn2_example.cc](examples/rc1_sn2_example.cc)
 
-M2 — PHY multi-TB: SaraMaxUlTbPerGrant y telemetría UL por TTI.
+Valores fijos hoy:
 
-M3 — Separación SARA (MAC): detección ciega por DMRS y aceptación de múltiples Msg3.
+- Pathloss: `ns3::WinnerPlusPropagationLossModel`
+- Winner+ Environment: `UMaEnvironment`
+- Winner+ LOS: `false` (NLOS)
+- Winner+ `HeightBasestation`: `50.0`
+- posicion eNB: `(0,0,30)`
+- UEs distribuidos uniforme en disco de radio `cellRadius`
+- altura UE forzada a `z=1.5`
+- `LteEnbMac::SaraMaxGroupSize = 2`
+- `LteEnbMac::ScmaMaxGroupSize = 2`
+- `LteUeRrc::T300 = 60000 ms`
+- `LteSpectrumPhy::ExtendedExpectedTbTracking = true`
 
-M4 — Msg4 broadcast (RRC): construcción y entrega al TC-RNTI común.
+Dependiente de `raMode`:
 
-M5 — Evaluación: curvas de éxito RA, retrasos, colisiones DMRS vs D, comparación LTE vs SARA.
+- si `new`: `ToaNumBins=2048`, `ToaToleranceBins=0`
+- si `legacy` o `sara`: `ToaNumBins=64`, `ToaToleranceBins=1`
 
-Validación (plan)
+## 8) Configuracion CE/NPRACH que usa hoy el simulador
 
-Prob. de éxito RA por intento vs carga.
+Fuente:
 
-Retransmisiones y delay medio.
+- [model/lte-enb-rrc.cc](model/lte-enb-rrc.cc)
 
-Tasa de colisión de DMRS ~ función de D.
+Umbrales CE por RSRP:
 
-Comparativa LTE vs SARA manteniendo constantes el resto de capas.
+- `CE0` si `RSRP > -115.5 dBm`
+- `CE1` si `-127.5 < RSRP <= -115.5 dBm`
+- `CE2` si `RSRP <= -127.5 dBm`
 
-* Estructura (sugerida)
-src/
-  lte/
-    model/
-      lte-enb-mac.cc      # (LENA-NB) + ganchos SARA (WIP)
-      lte-enb-phy.cc      # (LENA-NB) + receptor multi-TB (WIP)
-      lte-enb-rrc.cc      # (LENA-NB) + Msg4 broadcast (WIP)
-    examples/
-      lena-nb-5G-scenario.cc
-      sara-nbiot-sim.cc   # (WIP) escenario mínimo para SARA
-docs/
-  SARA-notes.md           # supuestos, fórmulas y trazas
-  results/                # scripts/figuras de evaluación
+Parametros RA por CE (SIB2 generado en eNB):
 
-* Acknowledgement
+- `nprachPeriodicity`: CE0 `320 ms`, CE1 `640 ms`, CE2 `2560 ms`
+- `nprachStartTime`: `256 ms` para CE0/CE1/CE2
+- `numRepetitionsPerPreambleAttempt`: CE0 `1`, CE1 `8`, CE2 `32`
+- `npdcchNumRepetitionsRA`: CE0 `8`, CE1 `64`, CE2 `512`
+- `npdcchStartSfCssRa`: CE0 `2`, CE1 `1.5`, CE2 `4`
+- `npdcchOffsetRa`: `0` para CE0/CE1/CE2
+- `maxNumPreambleAttemptCE`: `10` para CE0/CE1/CE2
+- `RaResponseWindowSize`: CE0 `10`, CE1 `8`, CE2 `8`
+- `macContentionResolutionTimer`: `32` para CE0/CE1/CE2
 
-Trabajo realizado en el marco de PuLS (BMVI 03EMF0203B), 5hine y Competence Center 5G.NRW (MWIDE 005-2108-0073 / 005-01903-0047), y con soporte del SFB 876 “Providing Information by Resource-Constrained Analysis”, proyecto A4.
+Layout NPRACH por defecto (Msg1):
 
-# References
+- CE0: `numSubcarriers=12`, `offset=36`
+- CE1: `numSubcarriers=12`, `offset=24`
+- CE2: `numSubcarriers=24`, `offset=0`
+- `NprachStrictNoOverlap = true`
 
-[1] MathWorks. 2021. NB-IoT NPDSCH Block Error Rate Simulation. Retrieved December 11, 2021 from https://www.mathworks.com/help/lte/ug/nb-iot-npdsch-block-error-rate-simulation.html
-[2] MathWorks. 2021. NB-IoT NPUSCH Block Error Rate Simulation. Retrieved December 11, 2021 from https://www.mathworks.com/help/lte/ug/nb-iot-npusch-block-error-rate-simulation.html
+## 9) Reportes CSV
+
+Fuente:
+
+- [model/sara-report.cc](model/sara-report.cc)
+
+Si `--report=true`, se generan CSV con prefijo `<prefix>`:
+
+- `<prefix>_msg1.csv`
+- `<prefix>_msg2.csv`
+- `<prefix>_msg3_ue.csv`
+- `<prefix>_msg3_enb.csv`
+- `<prefix>_msg3_sep.csv`
+- `<prefix>_msg3_rrc.csv`
+- `<prefix>_msg3_fwd.csv`
+- `<prefix>_ctx_enb.csv`
+- `<prefix>_msg4_enb.csv`
+- `<prefix>_msg4_ue.csv`
+- `<prefix>_msg4_air_enb.csv`
+- `<prefix>_msg4_rx_ue.csv`
+- `<prefix>_msg4_phy_ue.csv`
+- `<prefix>_dci_nb_ue.csv`
+- `<prefix>_expected_tb_ue.csv`
+- `<prefix>_msg5_tx.csv`
+- `<prefix>_msg5_enb.csv`
+- `<prefix>_transition.csv`
+- `<prefix>_summary.csv`
+
+## 10) Errores de configuracion comunes
+
+- `raMode invalido`: usa solo `legacy|sara|new`.
+- `phase2StartOffsetMs debe ser menor que stopMs`.
+- `nbRaBackoffMaxMs < nbRaBackoffMinMs`.
+- `populationPreset=custom` sin `customPopulation>0`.
+- `trafficProfile=custom` sin `customPeriodSeconds>0`.
+- falta Winner+ en `src/propagation`.
+
+## 11) Comandos utiles de referencia
+
+Imprimir ayuda completa:
+
+```bash
+./waf --run "rc1_sn2_example --PrintHelp"
+```
+
+Legacy:
+
+```bash
+./waf --run "rc1_sn2_example --raMode=legacy --stopMs=25000 --populationPreset=avg --trafficProfile=2h --maxArrivals=200"
+```
+
+SARA:
+
+```bash
+./waf --run "rc1_sn2_example --raMode=sara --stopMs=25000 --populationPreset=high --trafficProfile=10m --maxArrivals=500"
+```
+
+NEW:
+
+```bash
+./waf --run "rc1_sn2_example --raMode=new --stopMs=25000 --populationPreset=high --trafficProfile=2h --maxArrivals=500"
+```

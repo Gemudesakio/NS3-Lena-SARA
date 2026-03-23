@@ -38,6 +38,7 @@
 #include "lte-ue-net-device.h"
 #include "lte-enb-net-device.h"
 #include "lte-spectrum-value-helper.h"
+#include "sara-report.h"
 #include "lte-amc.h"
 #include "lte-ue-mac.h"
 #include "nb-iot-toa-utils.h"
@@ -182,6 +183,7 @@ LteUePhy::LteUePhy ()
 
 LteUePhy::LteUePhy (Ptr<LteSpectrumPhy> dlPhy, Ptr<LteSpectrumPhy> ulPhy)
   : LtePhy (dlPhy, ulPhy),
+    m_newSchemaActivated (false),
     m_uePhySapUser (0),
     m_ueCphySapUser (0),
     m_state (CELL_SEARCH),
@@ -251,6 +253,11 @@ LteUePhy::GetTypeId (void)
                    MakeDoubleAccessor (&LteUePhy::SetNoiseFigure, 
                                        &LteUePhy::GetNoiseFigure),
                    MakeDoubleChecker<double> ())
+    .AddAttribute ("NewSchemaActivated",
+                   "Enable ToA-based RAR forwarding to MAC for the new random-access scheme.",
+                   BooleanValue (false),
+                   MakeBooleanAccessor (&LteUePhy::m_newSchemaActivated),
+                   MakeBooleanChecker ())
     .AddAttribute ("TxMode1Gain",
                    "Transmission mode 1 gain in dB",
                    DoubleValue (0.0),
@@ -1265,8 +1272,29 @@ LteUePhy::ReceiveLteControlMessageList (std::list<Ptr<LteControlMessage> > msgLi
           m_uePhySapUser->NotifyAboutHarqOpportunity(dci.npuschOpportunity);
           //m_downlinkSpectrumPhy->AddExpectedTb (msg2->GetRnti(),dci.NDI, 192, 0, std::vector<int>({0}), 0, 0, 0, true /* DL */);
           //AddNbiotExpectedTb(msg2->GetRnti(),dci.NDI, 192, 0, std::vector<int>({0}), 0, 0, 0, true /* DL */);
-
-          Simulator::Schedule (MilliSeconds(subframes_to_wait), &LteUePhy::AddNbiotExpectedTb, this);
+          if (subframes_to_wait < 0)
+            {
+              subframes_to_wait = 0;
+            }
+          // NB-IoT control/data are decoupled in time (NPDCCH -> NPDSCH offset and repetitions).
+          // Keep expected-TB alive across intermediate RX bursts, but always with explicit expiry
+          // to avoid stale/zombie expectations.
+          Time expiry = Simulator::Now () + MilliSeconds (subframes_to_wait + 1);
+          if (SaraReport::IsEnabled ())
+            {
+              const uint64_t npdschFirst =
+                  dci.npdschOpportunity.empty () ? 0 : dci.npdschOpportunity.front ();
+              const uint64_t npdschLast =
+                  dci.npdschOpportunity.empty () ? 0 : dci.npdschOpportunity.back ();
+              SaraReport::LogDlDciNbUe (Simulator::GetContext (), m_rnti,
+                                       static_cast<uint64_t> (currentsubframe),
+                                       npdschFirst, npdschLast,
+                                       static_cast<uint64_t> (subframes_to_wait));
+            }
+          Simulator::Schedule (MilliSeconds (subframes_to_wait),
+                               static_cast<void (LteUePhy::*)(Time)> (&LteUePhy::AddNbiotExpectedTb),
+                               this,
+                               expiry);
 //                                      (short unsigned int, unsigned char, short unsigned int, unsigned char, std::vector<int>, unsigned char, unsigned char, unsigned char, bool), 
  //                      ns3::LteUePhy*, unsigned int, bool&, int, int, std::vector<int>, int, int, int, bool)’
 //                       short unsigned int, unsigned char, short unsigned int, unsigned char, std::vector<int>, unsigned char, unsigned char, unsigned char, bool
@@ -1281,9 +1309,67 @@ LteUePhy::ReceiveLteControlMessageList (std::list<Ptr<LteControlMessage> > msgLi
           Ptr<RarNbiotControlMessage> rarMsg = DynamicCast<RarNbiotControlMessage> (msg);
           if (rarMsg->GetRaRnti () == m_raRnti)
             {
-              // Forward full RAR message to MAC. MAC performs final acceptance
-              // (RAPID + ToA) and then programs Msg3 UL resources via SAP.
-              m_uePhySapUser->ReceiveLteControlMessage (msg);
+              bool hasSaraGroupRar = false;
+              for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
+                   it != rarMsg->RarListEnd ();
+                   ++it)
+                {
+                  if (it->saraGroup)
+                    {
+                      hasSaraGroupRar = true;
+                      break;
+                    }
+                }
+
+              // Legacy keeps PHY-side preprogramming from first matching RAR.
+              // New schema and SARA grouped RARs must defer final Msg3 scheduling
+              // to MAC after final RAR acceptance.
+              if (!m_newSchemaActivated && !hasSaraGroupRar)
+                {
+                  for (std::list<NbIotRrcSap::Rar>::const_iterator it = rarMsg->RarListBegin ();
+                       it != rarMsg->RarListEnd ();
+                       ++it)
+                    {
+                      if (it->rapId != m_raPreambleId)
+                        {
+                          // UL grant not for me
+                          continue;
+                        }
+                      else
+                        {
+                          NS_LOG_INFO ("received RAR RNTI " << m_raRnti);
+                          Ptr<DlCqiLteControlMessage> report = Create<DlCqiLteControlMessage> ();
+                          CqiListElement_s dlcqi;
+
+                          dlcqi.m_rnti = it->rarPayload.cellRnti;
+                          dlcqi.m_ri = 1; // not yet used
+                          dlcqi.m_cqiType = CqiListElement_s::P10;
+
+                          report->SetDlCqi (dlcqi);
+                          report->rsrp = DoGetRSRP ();
+                          DoSendLteControlMessage (report);
+
+                          int subframes = *(it->rarPayload.ulGrant.subframes.second.end () - 1) -
+                                          (10 * (m_frameNo - 1) + m_subframeNo - 1);
+                          int subcarrier = it->rarPayload.ulGrant.subframes.first;
+                          Simulator::Schedule (MilliSeconds (subframes),
+                                               &LteUePhy::QueueSubChannelsForTransmission,
+                                               this,
+                                               std::vector<int>{subcarrier});
+                          m_uePhySapUser->ReceiveLteControlMessage (msg);
+                          // reset RACH variables with out of range values
+                          m_raPreambleId = 255;
+                          m_raRnti = 11;
+                        }
+                    }
+                }
+              else
+                {
+                  // Forward full RAR message to MAC. MAC performs final acceptance
+                  // (RAPID + ToA for new, RAPID + tag for SARA grouped) and then
+                  // programs Msg3 UL resources via SAP.
+                  m_uePhySapUser->ReceiveLteControlMessage (msg);
+                }
             }
         }
       else if (msg->GetMessageType () == LteControlMessage::UL_DCI_NB)
@@ -1321,9 +1407,22 @@ LteUePhy::ReceiveLteControlMessageList (std::list<Ptr<LteControlMessage> > msgLi
 
 
 }
-void LteUePhy::AddNbiotExpectedTb(){
-          //m_downlinkSpectrumPhy->AddExpectedTb (rnti,ndi, size, mcs, map, layer, harqId, rv, downlink/* DL */);
+
+void
+LteUePhy::AddNbiotExpectedTb(Time expiry)
+{
+          if (SaraReport::IsEnabled ())
+            {
+              SaraReport::LogExpectedTbAddUe (Simulator::GetContext (), m_rnti);
+            }
           m_downlinkSpectrumPhy->AddExpectedTb (m_rnti,1, 192, 0, std::vector<int>{0}, 0, 1, 0, true/* DL */);
+          m_downlinkSpectrumPhy->SetExpectedTbExpiry (m_rnti, 0, expiry);
+}
+
+void
+LteUePhy::AddNbiotExpectedTb(){
+          // Fallback safety path: keep a short lifetime to avoid stale expected-TB entries.
+          AddNbiotExpectedTb (Simulator::Now () + MilliSeconds (1));
 }
 
 void

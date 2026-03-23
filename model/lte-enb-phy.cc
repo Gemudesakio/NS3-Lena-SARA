@@ -29,6 +29,7 @@
 #include <ns3/simulator.h>
 #include <ns3/attribute-accessor-helper.h>
 #include <ns3/double.h>
+#include <ns3/boolean.h>
 
 
 #include "lte-enb-phy.h"
@@ -171,6 +172,9 @@ LteEnbPhy::LteEnbPhy (Ptr<LteSpectrumPhy> dlPhy, Ptr<LteSpectrumPhy> ulPhy)
   m_harqPhyModule = Create <LteHarqPhy> ();
   m_downlinkSpectrumPhy->SetHarqPhyModule (m_harqPhyModule);
   m_uplinkSpectrumPhy->SetHarqPhyModule (m_harqPhyModule);
+  // Keep UL expected-TB entries across RX bursts so Msg3 windows are not
+  // dropped before reaching MAC/separator under NB-IoT bursty scheduling.
+  m_uplinkSpectrumPhy->SetAttribute ("ExtendedExpectedTbTracking", BooleanValue (true));
 }
 
 TypeId
@@ -732,30 +736,37 @@ LteEnbPhy::StartSubFrame (void)
     {
       std::set <uint16_t>::iterator it2;
       it2 = m_ueAttached.find ((*dciIt).GetDci ().m_rnti);
-
       if (it2 == m_ueAttached.end ())
         {
-          NS_LOG_ERROR ("UE not attached");
+          NS_LOG_WARN ("UL-DCI for non-attached RNTI=" << (*dciIt).GetDci ().m_rnti
+                       << " kept as expected TB to avoid pre-MAC Msg3 drop");
+        }
+
+      // send info of TB to LteSpectrumPhy
+      // translate to allocation map
+      std::vector <int> rbMap;
+      for (int i = (*dciIt).GetDci ().m_rbStart; i < (*dciIt).GetDci ().m_rbStart + (*dciIt).GetDci ().m_rbLen; i++)
+        {
+          rbMap.push_back (i);
+        }
+
+      const uint16_t rnti = (*dciIt).GetDci ().m_rnti;
+      m_uplinkSpectrumPhy->AddExpectedTb (rnti, (*dciIt).GetDci ().m_ndi,
+                                          (*dciIt).GetDci ().m_tbSize,
+                                          (*dciIt).GetDci ().m_mcs, rbMap,
+                                          0 /* always SISO*/,
+                                          0 /* no HARQ proc id in UL*/,
+                                          0 /* evaluated by LteSpectrumPhy*/,
+                                          false /* UL */);
+      // Expire stale expectations quickly if no UL packet arrives in this window.
+      m_uplinkSpectrumPhy->SetExpectedTbExpiry (rnti, 0, Simulator::Now () + MilliSeconds (2));
+      if ((*dciIt).GetDci ().m_ndi==1)
+        {
+          NS_LOG_DEBUG (this << " RNTI " << rnti << " NEW TB");
         }
       else
         {
-          // send info of TB to LteSpectrumPhy 
-          // translate to allocation map
-          std::vector <int> rbMap;
-          for (int i = (*dciIt).GetDci ().m_rbStart; i < (*dciIt).GetDci ().m_rbStart + (*dciIt).GetDci ().m_rbLen; i++)
-            {
-              rbMap.push_back (i);
-            }
-
-          m_uplinkSpectrumPhy->AddExpectedTb ((*dciIt).GetDci ().m_rnti, (*dciIt).GetDci ().m_ndi, (*dciIt).GetDci ().m_tbSize, (*dciIt).GetDci ().m_mcs, rbMap, 0 /* always SISO*/, 0 /* no HARQ proc id in UL*/, 0 /*evaluated by LteSpectrumPhy*/, false /* UL*/);
-          if ((*dciIt).GetDci ().m_ndi==1)
-            {
-              NS_LOG_DEBUG (this << " RNTI " << (*dciIt).GetDci ().m_rnti << " NEW TB");
-            }
-          else
-            {
-              NS_LOG_DEBUG (this << " RNTI " << (*dciIt).GetDci ().m_rnti << " HARQ RETX");
-            }
+          NS_LOG_DEBUG (this << " RNTI " << rnti << " HARQ RETX");
         }
     }
     //Tomar la cola de control DL de esta subtrama y procesarla

@@ -922,6 +922,18 @@ LteHelper::InstallSingleUeDevice (Ptr<Node> n)
   NS_ABORT_MSG_IF (m_imsiCounter >= 0xFFFFFFFF, "max num UEs exceeded");
   uint64_t imsi = ++m_imsiCounter;
 
+  // Keep IMSI mirrored in UE MAC for SARA/new-schema traces.
+  for (std::map<uint8_t, Ptr<ComponentCarrierUe>>::iterator it = ueCcMap.begin ();
+       it != ueCcMap.end ();
+       ++it)
+    {
+      Ptr<LteUeMac> mac = it->second->GetMac ();
+      if (mac)
+        {
+          mac->SetImsi (imsi);
+        }
+    }
+
 
   dev->SetNode (n);
   dev->SetAttribute ("Imsi", UintegerValue (imsi));

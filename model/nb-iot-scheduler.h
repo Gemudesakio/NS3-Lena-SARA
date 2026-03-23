@@ -71,6 +71,15 @@ struct UeConfig{
   uint64_t lastDl;
 };
 
+struct Msg4Context
+{
+  bool active = false;
+  uint64_t imsi = 0;
+  uint32_t raAttemptId = 0;
+  uint16_t tcRnti = 0;
+  uint64_t msg3EndSubframe = 0;
+  uint64_t deadlineSubframe = 0;
+};
 
 
 
@@ -104,6 +113,9 @@ void SetRntiRsrpMap(std::map<uint16_t, double> map);
 void ScheduleUlRlcBufferReq(uint64_t rnti, uint64_t dataSize); // Data in Byte
 void ScheduleDlRlcBufferReq(uint64_t rnti, std::map<uint8_t, LteMacSapProvider::ReportBufferStatusParameters> lcids); // Data in Byte
 void AddToUlBufferReq(uint64_t rnti, uint64_t dataSize);
+void CloneUeConfig(uint16_t srcRnti, uint16_t dstRnti);
+void RegisterMsg4Context (uint16_t rnti, const Msg4Context &ctx);
+void InvalidateMsg4Context (uint16_t rnti);
 
 void SortBasedOnSelectedSchedulingAlgorithm(SearchSpaceConfig ssc);
 std::vector<uint64_t> GetNextAvailableSearchSpaceCandidate(uint32_t rnti, uint64_t SearchSpaceStartFrame, uint64_t SearchSpaceStartSubframe, uint64_t R_max, uint64_t R);
@@ -129,6 +141,10 @@ protected:
   uint16_t GetPhysicalCarrierFromVirtual(uint16_t virtualCarrier) const;
   uint8_t GetCodebookFromVirtual(uint16_t virtualCarrier) const;
   uint16_t GetVirtualCarrier(uint16_t physicalCarrier, uint8_t codebook) const;
+  bool IsMsg4ContextActive (uint16_t rnti) const;
+  bool IsMsg4ContextExpired (uint16_t rnti, uint64_t nowSubframe) const;
+  bool DropStaleMsg4Context (uint16_t rnti, uint64_t nowSubframe, const char *reason,
+                             uint64_t candidateEndSubframe = 0);
 
   std::vector<std::vector<int>> m_uplink;
   std::vector<std::vector<int>> m_msg3UplinkVirtual;
@@ -152,6 +168,7 @@ protected:
 
   std::map<SearchSpaceConfig, std::vector<uint16_t>> m_searchSpaceRntiMap;
   std::map<uint16_t, UeConfig> m_rntiUeConfigMap;
+  std::map<uint16_t, Msg4Context> m_msg4ContextByRnti;
   std::map<SearchSpaceConfig, std::vector<NbIotRrcSap::NpdcchMessage>> m_rarQueue;
   bool m_only15KhzSpacing = true;
   bool m_newSchemaActivated;

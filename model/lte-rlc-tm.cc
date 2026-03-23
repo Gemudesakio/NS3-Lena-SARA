@@ -206,6 +206,12 @@ LteRlcTm::DoNotifyTxOpportunityNb (LteMacSapUser::TxOpportunityParameters txOpPa
   Simulator::Schedule(MilliSeconds(schedulingDelay), &LteMacSapProvider::TransmitPdu, m_macSapProvider, params);
   //m_macSapProvider->TransmitPdu (params);
 
+  // Update scheduler immediately if there is still data pending.
+  if (!m_txBuffer.empty ())
+    {
+      DoReportBufferStatusNb (NbIotRrcSap::NpdcchMessage::SearchSpaceType::type2);
+    }
+
   if (! m_txBuffer.empty ())
     {
       m_rbsTimer.Cancel ();

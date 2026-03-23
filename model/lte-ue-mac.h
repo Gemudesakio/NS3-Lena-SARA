@@ -60,6 +60,7 @@ public:
    * \brief Get the type ID.
    * \return the object TypeId
    */
+  void SetImsi (uint64_t imsi);
   static TypeId GetTypeId (void);
 
   LteUeMac ();
@@ -338,13 +339,24 @@ private:
   uint8_t m_preambleTransmissionCounter; ///< preamble tranamission counter
   uint8_t m_preambleTransmissionCounterCe; ///< preamble tranamission counter per CE level
   uint16_t m_backoffParameter; ///< backoff parameter
+  bool m_nbRaBackoffEnabled; ///< apply random backoff before NB-IoT Msg1 retry after RAR timeout
+  uint16_t m_nbRaBackoffMinMs; ///< minimum random backoff in ms
+  uint16_t m_nbRaBackoffMaxMs; ///< maximum random backoff in ms
   EventId m_noRaResponseReceivedEvent; ///< no RA response received event ID
   Ptr<UniformRandomVariable> m_raPreambleUniformVariable; ///< RA preamble random variable
+  Ptr<UniformRandomVariable> m_raBackoffUniformVariable; ///< RA retry backoff random variable
 
   uint32_t m_frameNo; ///< frame number
   uint32_t m_subframeNo; ///< subframe number
   uint8_t m_raRnti; ///< RA RNTI
   bool m_waitingForRaResponse; ///< waiting for RA response
+
+  bool    m_saraGroupActive = false; ///< true si el RAR recibido indica grupo SARA
+  uint8_t m_saraGroupSize   = 1;     ///< tamaño del grupo SARA (N)
+  uint8_t m_saraTag         = 0;     ///< etiqueta local del UE en el grupo [0..N-1]
+  bool    m_saraDesiredTagSet = false; ///< true si ya se eligió tag deseado
+  uint8_t m_saraDesiredTag    = 0;     ///< tag deseado dentro del grupo
+  bool    m_saraWaitingForTag = false; ///< esperando RAR con el tag deseado
 
   NbIotRrcSap::NprachParametersNb m_CeLevel; // CE Level based on RSRP
   NbIotRrcSap::NprachParametersNb m_CeLevelRapRetries; // CE Level based on RSRP, but might be increased due to RA failures

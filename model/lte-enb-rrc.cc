@@ -37,12 +37,15 @@
 #include <ns3/object-map.h>
 #include <ns3/object-factory.h>
 #include <ns3/simulator.h>
+#include "sara-report.h"
 
 #include <ns3/lte-radio-bearer-info.h>
 #include <ns3/eps-bearer-tag.h>
 #include <ns3/packet.h>
 
 #include <fstream>
+#include <sstream>
+#include <algorithm>
 #include <ns3/lte-rlc.h>
 #include <ns3/lte-rlc-tm.h>
 #include <ns3/lte-rlc-um.h>
@@ -55,8 +58,124 @@
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("LteEnbRrc");
-static uint64_t g_msg4TxCount = 0;
-static uint64_t g_msg5RxCount = 0;
+
+namespace
+{
+uint64_t g_staleConnReqTimeoutCalls = 0;
+uint64_t g_staleConnReqDrops = 0;
+uint64_t g_staleConnSetupCompleteDrops = 0;
+}
+
+namespace
+{
+bool
+IsValidNprachNumSubcarriers (uint8_t value)
+{
+  return (value == 12) || (value == 24) || (value == 36) || (value == 48);
+}
+
+bool
+IsValidNprachOffset (uint8_t value)
+{
+  return (value == 0) || (value == 2) || (value == 12) || (value == 18) || (value == 24) ||
+         (value == 34) || (value == 36);
+}
+
+NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers
+ToNprachNumSubcarriersEnum (uint8_t value)
+{
+  switch (value)
+    {
+    case 12:
+      return NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n12;
+    case 24:
+      return NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n24;
+    case 36:
+      return NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n36;
+    case 48:
+      return NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n48;
+    default:
+      NS_FATAL_ERROR ("Invalid NprachNumSubcarriers value=" << static_cast<uint32_t> (value)
+                      << ". Allowed values: 12,24,36,48.");
+    }
+}
+
+NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset
+ToNprachOffsetEnum (uint8_t value)
+{
+  switch (value)
+    {
+    case 0:
+      return NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n0;
+    case 2:
+      return NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n2;
+    case 12:
+      return NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n12;
+    case 18:
+      return NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n18;
+    case 24:
+      return NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n24;
+    case 34:
+      return NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n34;
+    case 36:
+      return NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n36;
+    default:
+      NS_FATAL_ERROR ("Invalid NprachSubcarrierOffset value=" << static_cast<uint32_t> (value)
+                      << ". Allowed values: 0,2,12,18,24,34,36.");
+    }
+}
+
+void
+ValidateNprachCeConfig (uint8_t ce0Num, uint8_t ce1Num, uint8_t ce2Num, uint8_t ce0Offset,
+                        uint8_t ce1Offset, uint8_t ce2Offset, bool strictNoOverlap)
+{
+  const uint8_t nums[3] = {ce0Num, ce1Num, ce2Num};
+  const uint8_t offsets[3] = {ce0Offset, ce1Offset, ce2Offset};
+  const char* names[3] = {"CE0", "CE1", "CE2"};
+
+  for (uint8_t i = 0; i < 3; ++i)
+    {
+      NS_ABORT_MSG_IF (!IsValidNprachNumSubcarriers (nums[i]),
+                       "Invalid NPRACH NumSubcarriers for " << names[i] << ": "
+                                                            << static_cast<uint32_t> (nums[i])
+                                                            << ". Allowed: 12,24,36,48.");
+      NS_ABORT_MSG_IF (!IsValidNprachOffset (offsets[i]),
+                       "Invalid NPRACH SubcarrierOffset for " << names[i] << ": "
+                                                              << static_cast<uint32_t> (offsets[i])
+                                                              << ". Allowed: 0,2,12,18,24,34,36.");
+
+      const uint16_t physicalStart = static_cast<uint16_t> (offsets[i] / 4);
+      const uint16_t physicalSpan = static_cast<uint16_t> (nums[i] / 4);
+      NS_ABORT_MSG_IF (physicalStart + physicalSpan > 12,
+                       "Invalid NPRACH placement for " << names[i] << ": offset="
+                                                       << static_cast<uint32_t> (offsets[i])
+                                                       << ", numSubcarriers="
+                                                       << static_cast<uint32_t> (nums[i])
+                                                       << " -> exceeds Msg1 compressed physical grid "
+                                                       << "(offset/4 + num/4 > 12).");
+    }
+
+  if (strictNoOverlap)
+    {
+      for (uint8_t a = 0; a < 3; ++a)
+        {
+          const uint16_t startA = offsets[a];
+          const uint16_t endA = static_cast<uint16_t> (offsets[a] + nums[a] - 1);
+          for (uint8_t b = static_cast<uint8_t> (a + 1); b < 3; ++b)
+            {
+              const uint16_t startB = offsets[b];
+              const uint16_t endB = static_cast<uint16_t> (offsets[b] + nums[b] - 1);
+              const bool overlap = !(endA < startB || endB < startA);
+              NS_ABORT_MSG_IF (overlap,
+                               "Invalid NPRACH CE layout: rapid ranges overlap between "
+                                 << names[a] << " [" << startA << ".." << endA << "] and "
+                                 << names[b] << " [" << startB << ".." << endB
+                                 << "]. Use disjoint ranges or disable strict no-overlap.");
+            }
+        }
+    }
+}
+} // namespace
 
 ///////////////////////////////////////////
 // CMAC SAP forwarder
@@ -84,6 +203,8 @@ public:
   virtual void NotifyDataInactivityNb(uint16_t rnti, uint8_t lcid);
   virtual void NotifyDataInactivitySchedulerNb(uint16_t rnti);
   virtual void NotifyDataActivitySchedulerNb(uint16_t rnti);
+  virtual void NotifySharedFallbackWindowClosed (uint16_t rnti);
+  virtual void NotifyRaResponseTransmitted (uint16_t rnti);
 
 private:
   LteEnbRrc* m_rrc; ///< the RRC
@@ -138,6 +259,18 @@ void
 EnbRrcMemberLteEnbCmacSapUser::NotifyDataActivitySchedulerNb(uint16_t rnti)
 {
   m_rrc->DoNotifyDataActivitySchedulerNb(rnti);
+}
+
+void
+EnbRrcMemberLteEnbCmacSapUser::NotifySharedFallbackWindowClosed (uint16_t rnti)
+{
+  m_rrc->DoNotifySharedFallbackWindowClosed (rnti);
+}
+
+void
+EnbRrcMemberLteEnbCmacSapUser::NotifyRaResponseTransmitted (uint16_t rnti)
+{
+  m_rrc->DoNotifyRaResponseTransmitted (rnti);
 }
 ///////////////////////////////////////////
 // UeManager
@@ -328,9 +461,8 @@ UeManager::DoInitialize ()
   switch (m_state)
     {
     case INITIAL_RANDOM_ACCESS:
-      m_connectionRequestTimeout = Simulator::Schedule (m_rrc->m_connectionRequestTimeoutDuration,
-                                                        &LteEnbRrc::ConnectionRequestTimeout,
-                                                        m_rrc, m_rnti);
+      // Do not arm the watchdog here. It will be armed when Msg2 (RAR) is
+      // actually transmitted by MAC.
       break;
 
     case HANDOVER_JOINING:
@@ -1020,15 +1152,9 @@ UeManager::RecvRrcConnectionRequest (LteRrcSap::RrcConnectionRequest msg)
             m_imsi = msg.ueIdentity;
 
             // send RRC CONNECTION SETUP to UE
-            LteRrcSap::RrcConnectionSetup msg2;
-            msg2.rrcTransactionIdentifier = GetNewRrcTransactionIdentifier ();
-            msg2.radioResourceConfigDedicated = BuildRadioResourceConfigDedicated ();
-
+            LteRrcSap::RrcConnectionSetup msg2 = BuildRrcConnectionSetup ();
+            m_rrc->RegisterMsg4ValidityContext (m_rnti, m_imsi);
             m_rrc->m_rrcSapUser->SendRrcConnectionSetup (m_rnti, msg2);
-            ++g_msg4TxCount;
-            NS_LOG_INFO ("[ENB][MSG4][TX] imsi=" << m_imsi
-                        << " c-rnti=" << m_rnti
-                        << " totalMsg4Tx=" << g_msg4TxCount);
 
             RecordDataRadioBearersToBeStarted ();
             m_connectionSetupTimeout = Simulator::Schedule (
@@ -1059,6 +1185,23 @@ UeManager::RecvRrcConnectionRequest (LteRrcSap::RrcConnectionRequest msg)
       NS_FATAL_ERROR ("method unexpected in state " << ToString (m_state));
       break;
     }
+}
+
+void
+UeManager::StartConnectionSetupForImsi (uint64_t imsi)
+{
+  NS_LOG_FUNCTION (this << imsi);
+  NS_ASSERT_MSG (m_state == INITIAL_RANDOM_ACCESS,
+                 "StartConnectionSetupForImsi in unexpected state " << ToString (m_state));
+
+  m_connectionRequestTimeout.Cancel ();
+  m_imsi = imsi;
+
+  RecordDataRadioBearersToBeStarted ();
+  m_connectionSetupTimeout = Simulator::Schedule (
+      m_rrc->m_connectionSetupTimeoutDuration,
+      &LteEnbRrc::ConnectionSetupTimeout, m_rrc, m_rnti);
+  SwitchToState (CONNECTION_SETUP);
 }
 
 uint64_t
@@ -1122,15 +1265,9 @@ UeManager::RecvRrcConnectionResumeRequestNb (NbIotRrcSap::RrcConnectionResumeReq
             }
         else if (m_rrc->m_admitRrcConnectionRequest)
             {
-              //m_imsi = msg.ueIdentity;
-              LteRrcSap::RrcConnectionSetup msg2;
-              msg2.rrcTransactionIdentifier = GetNewRrcTransactionIdentifier ();
-              msg2.radioResourceConfigDedicated = BuildRadioResourceConfigDedicated ();
+              LteRrcSap::RrcConnectionSetup msg2 = BuildRrcConnectionSetup ();
+              m_rrc->RegisterMsg4ValidityContext (m_rnti, m_imsi);
               m_rrc->m_rrcSapUser->SendRrcConnectionSetup (m_rnti, msg2);
-              ++g_msg4TxCount;
-              NS_LOG_INFO ("[ENB][MSG4][TX] imsi=" << m_imsi
-                          << " c-rnti=" << m_rnti
-                          << " totalMsg4Tx=" << g_msg4TxCount);
 
               RecordDataRadioBearersToBeStarted ();
               m_connectionSetupTimeout = Simulator::Schedule (
@@ -1195,15 +1332,9 @@ UeManager::RecvRrcEarlyDataRequestNb (NbIotRrcSap::RrcEarlyDataRequestNb msg)
             }
         else if (m_rrc->m_admitRrcConnectionRequest)
             {
-              //m_imsi = msg.ueIdentity;
-              LteRrcSap::RrcConnectionSetup msg2;
-              msg2.rrcTransactionIdentifier = GetNewRrcTransactionIdentifier ();
-              msg2.radioResourceConfigDedicated = BuildRadioResourceConfigDedicated ();
+              LteRrcSap::RrcConnectionSetup msg2 = BuildRrcConnectionSetup ();
+              m_rrc->RegisterMsg4ValidityContext (m_rnti, m_imsi);
               m_rrc->m_rrcSapUser->SendRrcConnectionSetup (m_rnti, msg2);
-              ++g_msg4TxCount;
-              NS_LOG_INFO ("[ENB][MSG4][TX] imsi=" << m_imsi
-                          << " c-rnti=" << m_rnti
-                          << " totalMsg4Tx=" << g_msg4TxCount);
 
               RecordDataRadioBearersToBeStarted ();
               m_connectionSetupTimeout = Simulator::Schedule (
@@ -1246,10 +1377,6 @@ UeManager::RecvRrcConnectionSetupCompleted (LteRrcSap::RrcConnectionSetupComplet
   switch (m_state)
     {
     case CONNECTION_SETUP:
-      ++g_msg5RxCount;
-      NS_LOG_INFO ("[ENB][MSG5][RX] imsi=" << m_imsi
-                  << " c-rnti=" << m_rnti
-                  << " totalMsg5Rx=" << g_msg5RxCount);
       m_rrc->m_cmacSapProvider.at(0)->NotifyConnectionSuccessful(m_rnti);
       m_connectionSetupTimeout.Cancel ();
       if ( m_caSupportConfigured == false && m_rrc->m_numberOfComponentCarriers > 1)
@@ -1616,6 +1743,37 @@ UeManager::CancelPendingEvents ()
   m_handoverLeavingTimeout.Cancel ();
 }
 
+void
+UeManager::ArmConnectionRequestTimeout ()
+{
+  NS_LOG_FUNCTION (this);
+  m_connectionRequestTimeout.Cancel ();
+  m_connectionRequestTimeout = Simulator::Schedule (m_rrc->m_connectionRequestTimeoutDuration,
+                                                    &LteEnbRrc::ConnectionRequestTimeout,
+                                                    m_rrc, m_rnti);
+}
+
+void
+UeManager::ResetRlcEntities ()
+{
+  NS_LOG_FUNCTION (this);
+  if (m_srb0 && m_srb0->m_rlc)
+    {
+      m_srb0->m_rlc->DoReset ();
+    }
+  if (m_srb1 && m_srb1->m_rlc)
+    {
+      m_srb1->m_rlc->DoReset ();
+    }
+  for (auto &drb : m_drbMap)
+    {
+      if (drb.second && drb.second->m_rlc)
+        {
+          drb.second->m_rlc->DoReset ();
+        }
+    }
+}
+
 uint8_t
 UeManager::AddDataRadioBearerInfo (Ptr<LteDataRadioBearerInfo> drbInfo)
 {
@@ -1686,6 +1844,20 @@ UeManager::BuildRrcConnectionReconfiguration ()
     }
 
   return msg;
+}
+
+LteRrcSap::RrcConnectionSetup
+UeManager::BuildRrcConnectionSetup ()
+{
+  NS_LOG_FUNCTION (this);
+  LteRrcSap::RrcConnectionSetup msg2;
+  msg2.rrcTransactionIdentifier = GetNewRrcTransactionIdentifier ();
+  msg2.radioResourceConfigDedicated = BuildRadioResourceConfigDedicated ();
+  // For legacy/new, include UE identity when available to avoid Msg4 cross-acceptance
+  // at UE side in anomalous shared-TC-RNTI situations. SARA grouped path may override.
+  msg2.ueIdentity = (m_imsi != 0) ? m_imsi : 0;
+  msg2.assignedRnti = 0;
+  return msg2;
 }
 
 LteRrcSap::RadioResourceConfigDedicated
@@ -1970,6 +2142,13 @@ LteEnbRrc::LteEnbRrc ()
     m_reconfigureUes (false),
     m_numberOfComponentCarriers (0),
     m_carriersConfigured (false),
+    m_nprachCe0NumSubcarriers (12),
+    m_nprachCe1NumSubcarriers (12),
+    m_nprachCe2NumSubcarriers (24),
+    m_nprachCe0SubcarrierOffset (36),
+    m_nprachCe1SubcarrierOffset (24),
+    m_nprachCe2SubcarrierOffset (0),
+    m_nprachStrictNoOverlap (true),
     m_edt(true)
 {
   NS_LOG_FUNCTION (this);
@@ -2123,6 +2302,12 @@ LteEnbRrc::GetTypeId (void)
                    TimeValue (MilliSeconds (30000)),
                    MakeTimeAccessor (&LteEnbRrc::m_connectionSetupTimeoutDuration),
                    MakeTimeChecker ())
+    .AddAttribute ("Msg4ValidityDuration",
+                   "Maximum validity window for scheduling Msg4 after Msg3 "
+                   "reception. Msg4 beyond this horizon is treated as stale.",
+                   TimeValue (Seconds (60)),
+                   MakeTimeAccessor (&LteEnbRrc::m_msg4ValidityDuration),
+                   MakeTimeChecker (MilliSeconds (1)))
     .AddAttribute ("ConnectionResumeTimeoutDuration",
                    "After accepting connection request, if no RRC CONNECTION "
                    "SETUP COMPLETE is received before this time, the UE "
@@ -2174,6 +2359,41 @@ LteEnbRrc::GetTypeId (void)
                    UintegerValue (1),
                    MakeIntegerAccessor (&LteEnbRrc::m_numberOfComponentCarriers),
                    MakeIntegerChecker<int16_t> (MIN_NO_CC, MAX_NO_CC))
+    .AddAttribute ("NprachCe0NumSubcarriers",
+                   "Number of NPRACH preamble subcarriers for CE0 (12,24,36,48).",
+                   UintegerValue (12),
+                   MakeUintegerAccessor (&LteEnbRrc::m_nprachCe0NumSubcarriers),
+                   MakeUintegerChecker<uint8_t> (12, 48))
+    .AddAttribute ("NprachCe1NumSubcarriers",
+                   "Number of NPRACH preamble subcarriers for CE1 (12,24,36,48).",
+                   UintegerValue (12),
+                   MakeUintegerAccessor (&LteEnbRrc::m_nprachCe1NumSubcarriers),
+                   MakeUintegerChecker<uint8_t> (12, 48))
+    .AddAttribute ("NprachCe2NumSubcarriers",
+                   "Number of NPRACH preamble subcarriers for CE2 (12,24,36,48).",
+                   UintegerValue (24),
+                   MakeUintegerAccessor (&LteEnbRrc::m_nprachCe2NumSubcarriers),
+                   MakeUintegerChecker<uint8_t> (12, 48))
+    .AddAttribute ("NprachCe0SubcarrierOffset",
+                   "NPRACH subcarrier offset for CE0 (0,2,12,18,24,34,36).",
+                   UintegerValue (36),
+                   MakeUintegerAccessor (&LteEnbRrc::m_nprachCe0SubcarrierOffset),
+                   MakeUintegerChecker<uint8_t> (0, 36))
+    .AddAttribute ("NprachCe1SubcarrierOffset",
+                   "NPRACH subcarrier offset for CE1 (0,2,12,18,24,34,36).",
+                   UintegerValue (24),
+                   MakeUintegerAccessor (&LteEnbRrc::m_nprachCe1SubcarrierOffset),
+                   MakeUintegerChecker<uint8_t> (0, 36))
+    .AddAttribute ("NprachCe2SubcarrierOffset",
+                   "NPRACH subcarrier offset for CE2 (0,2,12,18,24,34,36).",
+                   UintegerValue (0),
+                   MakeUintegerAccessor (&LteEnbRrc::m_nprachCe2SubcarrierOffset),
+                   MakeUintegerChecker<uint8_t> (0, 36))
+    .AddAttribute ("NprachStrictNoOverlap",
+                   "If true, CE0/CE1/CE2 rapid ranges must be disjoint.",
+                   BooleanValue (true),
+                   MakeBooleanAccessor (&LteEnbRrc::m_nprachStrictNoOverlap),
+                   MakeBooleanChecker ())
 
     // Handover related attributes
     .AddAttribute ("AdmitHandoverRequest",
@@ -2762,6 +2982,16 @@ void
 LteEnbRrc::ConnectionRequestTimeout (uint16_t rnti)
 {
   NS_LOG_FUNCTION (this << rnti);
+  if (!HasUeManager (rnti))
+    {
+      ++g_staleConnReqTimeoutCalls;
+      NS_LOG_WARN ("Drop stale ConnectionRequestTimeout for unknown rnti=" << rnti);
+      return;
+    }
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogEnbContextEvent ("rrc", "conn-req-timeout", rnti, GetUeManagerbyRnti (rnti)->GetImsi ());
+    }
   NS_ASSERT_MSG (GetUeManagerbyRnti (rnti)->GetState () == UeManager::INITIAL_RANDOM_ACCESS,
                  "ConnectionRequestTimeout in unexpected state " << ToString (GetUeManagerbyRnti (rnti)->GetState ()));
   m_rrcTimeoutTrace (GetUeManagerbyRnti (rnti)->GetImsi (), rnti,
@@ -2773,6 +3003,10 @@ void
 LteEnbRrc::ConnectionSetupTimeout (uint16_t rnti)
 {
   NS_LOG_FUNCTION (this << rnti);
+  if (SaraReport::IsEnabled () && HasUeManager (rnti))
+    {
+      SaraReport::LogEnbContextEvent ("rrc", "conn-setup-timeout", rnti, GetUeManagerbyRnti (rnti)->GetImsi ());
+    }
   NS_ASSERT_MSG (GetUeManagerbyRnti (rnti)->GetState () == UeManager::CONNECTION_SETUP,
                  "ConnectionSetupTimeout in unexpected state " << ToString (GetUeManagerbyRnti (rnti)->GetState ()));
   m_rrcTimeoutTrace (GetUeManagerbyRnti (rnti)->GetImsi (), rnti,
@@ -2839,6 +3073,12 @@ void
 LteEnbRrc::DoCompleteSetupUe (uint16_t rnti, LteEnbRrcSapProvider::CompleteSetupUeParameters params)
 {
   NS_LOG_FUNCTION (this << rnti);
+  if (!HasUeManager (rnti))
+    {
+      ++g_staleConnReqDrops;
+      NS_LOG_WARN ("Drop stale CompleteSetupUe for unknown rnti=" << rnti);
+      return;
+    }
   GetUeManagerbyRnti (rnti)->CompleteSetupUe (params);
 }
 
@@ -2846,13 +3086,177 @@ void
 LteEnbRrc::DoRecvRrcConnectionRequest (uint16_t rnti, LteRrcSap::RrcConnectionRequest msg)
 {
   NS_LOG_FUNCTION (this << rnti);
+  if (!HasUeManager (rnti))
+    {
+      ++g_staleConnReqDrops;
+      NS_LOG_WARN ("Drop stale RRCConnectionRequest for unknown rnti=" << rnti);
+      return;
+    }
   GetUeManagerbyRnti (rnti)->RecvRrcConnectionRequest (msg);
+}
+
+void
+LteEnbRrc::DoEnqueueConnectionRequest (uint16_t rnti, uint64_t windowEnd, bool isLast, LteRrcSap::RrcConnectionRequest msg)
+{
+  NS_LOG_FUNCTION (this << rnti << windowEnd << isLast);
+  CancelTempRntiRequestTimeout (rnti);
+  const std::pair<uint16_t, uint64_t> key = std::make_pair (rnti, windowEnd);
+  PendingConnReq entry;
+  entry.msg = msg;
+  entry.rxTime = Simulator::Now ();
+  m_contentionGroups[key].entries.push_back (entry);
+
+  if (isLast)
+    {
+      ResolveContentionGroup (rnti, windowEnd);
+    }
+}
+
+void
+LteEnbRrc::ResolveContentionGroup (uint16_t rnti, uint64_t windowEnd)
+{
+  NS_LOG_FUNCTION (this << rnti << windowEnd);
+  const std::pair<uint16_t, uint64_t> key = std::make_pair (rnti, windowEnd);
+  std::map<std::pair<uint16_t, uint64_t>, ContentionGroup>::iterator it =
+    m_contentionGroups.find (key);
+  if (it == m_contentionGroups.end ())
+    {
+      return;
+    }
+
+  bool sentAny = false;
+  for (std::vector<PendingConnReq>::const_iterator e = it->second.entries.begin ();
+       e != it->second.entries.end (); ++e)
+    {
+      if (!m_admitRrcConnectionRequest)
+        {
+          NS_LOG_INFO ("rejecting grouped connection request for temp RNTI " << rnti);
+          continue;
+        }
+
+      const uint64_t imsi = e->msg.ueIdentity;
+      uint16_t assignedRnti = CreateUeManagerForAssignedRnti (rnti, imsi);
+      SendGroupedConnectionSetup (rnti, imsi, assignedRnti);
+      sentAny = true;
+    }
+
+  if (sentAny && HasUeManager (rnti))
+    {
+      Time cleanupDelay = m_connectionRequestTimeoutDuration;
+      if (SaraReport::IsEnabled ())
+        {
+          SaraReport::LogEnbContextEvent ("rrc", "schedule-grouped-temp-cleanup", rnti);
+        }
+      Simulator::Schedule (cleanupDelay, &LteEnbRrc::GroupedTempRntiCleanupTimeout, this, rnti);
+    }
+
+  m_contentionGroups.erase (it);
+}
+
+void
+LteEnbRrc::GroupedTempRntiCleanupTimeout (uint16_t rnti)
+{
+  NS_LOG_FUNCTION (this << rnti);
+  if (!HasUeManager (rnti))
+    {
+      if (SaraReport::IsEnabled ())
+        {
+          SaraReport::LogEnbContextEvent ("rrc", "grouped-temp-cleanup-stale", rnti);
+        }
+      return;
+    }
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogEnbContextEvent ("rrc", "grouped-temp-cleanup-fire", rnti, GetUeManagerbyRnti (rnti)->GetImsi ());
+    }
+  RemoveUe (rnti);
+}
+
+uint16_t
+LteEnbRrc::CreateUeManagerForAssignedRnti (uint16_t tempRnti, uint64_t imsi)
+{
+  NS_LOG_FUNCTION (this << tempRnti << imsi);
+  uint8_t componentCarrierId = 0;
+  if (HasUeManager (tempRnti))
+    {
+      componentCarrierId = GetUeManagerbyRnti (tempRnti)->GetComponentCarrierId ();
+    }
+
+  uint16_t assignedRnti = AddUe (UeManager::INITIAL_RANDOM_ACCESS, componentCarrierId);
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (assignedRnti);
+  ueManager->StartConnectionSetupForImsi (imsi);
+  return assignedRnti;
+}
+
+void
+LteEnbRrc::SendGroupedConnectionSetup (uint16_t tempRnti, uint64_t imsi, uint16_t assignedRnti)
+{
+  NS_LOG_FUNCTION (this << tempRnti << imsi << assignedRnti);
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (assignedRnti);
+
+  LteRrcSap::RrcConnectionSetup msg = ueManager->BuildRrcConnectionSetup ();
+  msg.ueIdentity = imsi;
+  msg.assignedRnti = assignedRnti;
+
+  // omit duplicate SARA Msg4 log; keep only TX log in protocol layer
+  uint8_t componentCarrierId = ueManager->GetComponentCarrierId ();
+  m_cmacSapProvider.at (componentCarrierId)->MapTempRntiToDefRnti (tempRnti, assignedRnti);
+  RegisterMsg4ValidityContext (tempRnti, imsi);
+  m_rrcSapUser->SendRrcConnectionSetup (tempRnti, msg);
+}
+
+void
+LteEnbRrc::RegisterMsg4ValidityContext (uint16_t rnti, uint64_t imsi)
+{
+  uint8_t componentCarrierId = 0;
+  if (HasUeManager (rnti))
+    {
+      componentCarrierId = GetUeManagerbyRnti (rnti)->GetComponentCarrierId ();
+    }
+  if (componentCarrierId >= m_cmacSapProvider.size () ||
+      m_cmacSapProvider.at (componentCarrierId) == 0)
+    {
+      return;
+    }
+
+  const uint64_t nowSubframe = static_cast<uint64_t> (Simulator::Now ().GetMilliSeconds ());
+  const int64_t validityMsRaw = m_msg4ValidityDuration.GetMilliSeconds ();
+  const uint64_t validityMs = static_cast<uint64_t> (std::max<int64_t> (1, validityMsRaw));
+  const uint64_t deadlineSubframe = nowSubframe + validityMs;
+
+  LteEnbCmacSapProvider::Msg4ValidityContext ctx;
+  ctx.imsi = imsi;
+  ctx.raAttemptId = ++m_msg4AttemptCounter[rnti];
+  ctx.tcRnti = rnti;
+  ctx.msg3EndSubframe = nowSubframe;
+  ctx.deadlineSubframe = deadlineSubframe;
+  m_cmacSapProvider.at (componentCarrierId)->RegisterMsg4ValidityContext (rnti, ctx);
+}
+
+void
+LteEnbRrc::CancelTempRntiRequestTimeout (uint16_t tempRnti)
+{
+  if (!HasUeManager (tempRnti))
+    {
+      return;
+    }
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (tempRnti);
+  if (ueManager->GetState () == UeManager::INITIAL_RANDOM_ACCESS)
+    {
+      ueManager->CancelPendingEvents ();
+    }
 }
 
 void
 LteEnbRrc::DoRecvRrcConnectionResumeRequestNb (uint16_t rnti, NbIotRrcSap::RrcConnectionResumeRequestNb msg)
 {
   NS_LOG_FUNCTION (this << rnti);
+  if (!HasUeManager (rnti))
+    {
+      ++g_staleConnReqDrops;
+      NS_LOG_WARN ("Drop stale RRCConnectionResumeRequestNb for unknown rnti=" << rnti);
+      return;
+    }
   if(DoCheckIfResumeIdExists(msg.resumeIdentity) && m_admitRrcConnectionResumeRequest){
     ResumeUe(rnti, msg.resumeIdentity);
   }
@@ -2862,6 +3266,12 @@ LteEnbRrc::DoRecvRrcConnectionResumeRequestNb (uint16_t rnti, NbIotRrcSap::RrcCo
 void
 LteEnbRrc::DoRecvRrcEarlyDataRequestNb (uint16_t rnti, NbIotRrcSap::RrcEarlyDataRequestNb msg)
 {
+    if (!HasUeManager (rnti))
+      {
+        ++g_staleConnReqDrops;
+        NS_LOG_WARN ("Drop stale RrcEarlyDataRequestNb for unknown rnti=" << rnti);
+        return;
+      }
     //NS_LOG_FUNCTION (this << rnti);
     //EpsBearerTag tag;
     //tag.SetRnti (65535);
@@ -2885,7 +3295,20 @@ void
 LteEnbRrc::DoRecvRrcConnectionSetupCompleted (uint16_t rnti, LteRrcSap::RrcConnectionSetupCompleted msg)
 {
   NS_LOG_FUNCTION (this << rnti);
-  GetUeManagerbyRnti (rnti)->RecvRrcConnectionSetupCompleted (msg);
+  if (!HasUeManager (rnti))
+    {
+      ++g_staleConnSetupCompleteDrops;
+      NS_LOG_WARN ("Drop stale RRCConnectionSetupCompleted for unknown rnti=" << rnti);
+      return;
+    }
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (rnti);
+  NS_LOG_INFO ("[ENB][MSG5][SETUP-COMPLETE] imsi=" << ueManager->GetImsi ()
+               << " C-RNTI=" << rnti);
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogMsg5Enb (ueManager->GetImsi (), rnti);
+    }
+  ueManager->RecvRrcConnectionSetupCompleted (msg);
 }
 
 void
@@ -3189,6 +3612,11 @@ void
 LteEnbRrc::DoNotifyDataInactivityNb(uint16_t rnti, uint8_t lcid)
 {
   NS_LOG_FUNCTION (this << (uint32_t) rnti);
+  if (!HasUeManager (rnti))
+    {
+      NS_LOG_WARN ("Ignoring late DoNotifyDataInactivityNb for orphan RNTI=" << rnti);
+      return;
+    }
   Ptr<UeManager> ueManager = GetUeManagerbyRnti(rnti);
   ueManager->NotifyDataInactivityNb(lcid);
 }
@@ -3197,6 +3625,11 @@ void
 LteEnbRrc::DoNotifyDataInactivitySchedulerNb(uint16_t rnti)
 {
   NS_LOG_FUNCTION (this << (uint32_t) rnti);
+  if (!HasUeManager (rnti))
+    {
+      NS_LOG_WARN ("Ignoring late DoNotifyDataInactivitySchedulerNb for orphan RNTI=" << rnti);
+      return;
+    }
   Ptr<UeManager> ueManager = GetUeManagerbyRnti(rnti);
   ueManager->NotifyDataInactivitySchedulerNb();
 }
@@ -3204,8 +3637,64 @@ void
 LteEnbRrc::DoNotifyDataActivitySchedulerNb(uint16_t rnti)
 {
   NS_LOG_FUNCTION (this << (uint32_t) rnti);
+  if (!HasUeManager (rnti))
+    {
+      NS_LOG_WARN ("Ignoring late DoNotifyDataActivitySchedulerNb for orphan RNTI=" << rnti);
+      return;
+    }
   Ptr<UeManager> ueManager = GetUeManagerbyRnti(rnti);
   ueManager->NotifyDataActivitySchedulerNb();
+}
+
+void
+LteEnbRrc::DoNotifySharedFallbackWindowClosed (uint16_t rnti)
+{
+  NS_LOG_FUNCTION (this << (uint32_t) rnti);
+  if (!HasUeManager (rnti))
+    {
+      NS_LOG_WARN ("Ignoring shared-fallback cleanup for orphan RNTI=" << rnti);
+      return;
+    }
+
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (rnti);
+  if (ueManager->GetState () != UeManager::INITIAL_RANDOM_ACCESS)
+    {
+      NS_LOG_WARN ("Ignoring shared-fallback cleanup for RNTI=" << rnti
+                   << " in state " << ToString (ueManager->GetState ()));
+      return;
+    }
+
+  NS_LOG_INFO ("[ENB][RA][CLEANUP-EARLY] remove shared-fallback context rnti=" << rnti);
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogEnbContextEvent ("rrc", "shared-fallback-window-closed", rnti, ueManager->GetImsi ());
+    }
+  RemoveUe (rnti);
+}
+
+void
+LteEnbRrc::DoNotifyRaResponseTransmitted (uint16_t rnti)
+{
+  NS_LOG_FUNCTION (this << static_cast<uint32_t> (rnti));
+  if (!HasUeManager (rnti))
+    {
+      NS_LOG_WARN ("Ignoring RAR-TX watchdog arm for orphan RNTI=" << rnti);
+      return;
+    }
+
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (rnti);
+  if (ueManager->GetState () != UeManager::INITIAL_RANDOM_ACCESS)
+    {
+      NS_LOG_WARN ("Ignoring RAR-TX watchdog arm for RNTI=" << rnti
+                   << " in state " << ToString (ueManager->GetState ()));
+      return;
+    }
+
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogEnbContextEvent ("rrc", "arm-conn-req-timeout-rar-tx", rnti, ueManager->GetImsi ());
+    }
+  ueManager->ArmConnectionRequestTimeout ();
 }
 uint8_t
 LteEnbRrc::DoAddUeMeasReportConfigForHandover (LteRrcSap::ReportConfigEutra reportConfig)
@@ -3328,6 +3817,12 @@ LteEnbRrc::AddUe (UeManager::State state, uint8_t componentCarrierId)
   m_ccmRrcSapProvider-> AddUe (rnti, (uint8_t)state);
   m_ueActiveMap.insert (std::pair<uint16_t, Ptr<UeManager> > (rnti, ueManager));
   ueManager->Initialize ();
+  if (SaraReport::IsEnabled ())
+    {
+      std::ostringstream oss;
+      oss << "add-ue-state-" << static_cast<uint32_t> (state);
+      SaraReport::LogEnbContextEvent ("rrc", oss.str (), rnti);
+    }
   const uint16_t cellId = ComponentCarrierToCellId (componentCarrierId);
   NS_LOG_DEBUG (this << " New UE RNTI " << rnti << " cellId " << cellId << " srs CI " << ueManager->GetSrsConfigurationIndex ());
   m_newUeContextTrace (cellId, rnti);
@@ -3353,9 +3848,12 @@ LteEnbRrc::DoAllocateTemporaryResumeId()
 
 void 
 LteEnbRrc::MoveUeToResumed(uint16_t rnti, uint64_t resumeId){
-  
+  Ptr<UeManager> ueManager = GetUeManagerbyRnti (rnti);
+  // Cancel internal RLC retransmission timers before moving UE out of active map.
+  ueManager->ResetRlcEntities ();
+
   // Store information of old UeManager
-  m_ueResumedMap[resumeId] = GetUeManagerbyRnti(rnti);
+  m_ueResumedMap[resumeId] = ueManager;
   m_cmacSapProvider.at(0)->MoveUeToResume(rnti, resumeId);
   m_ccmRrcSapProvider->MoveUeToResume(rnti, resumeId);
   m_rrcSapUser->MoveUeToResume(rnti,resumeId);
@@ -3369,7 +3867,13 @@ LteEnbRrc::ResumeUe(uint16_t rnti, uint64_t resumeId){
 
   // Remove parts of new Temporary UeManager that arent needed
   std::map <uint16_t, Ptr<UeManager> >::iterator it = m_ueActiveMap.find (rnti);
+  if (it->second)
+    {
+      it->second->ResetRlcEntities ();
+    }
   it->second->CancelPendingEvents ();//cancel pending events
+  m_msg4AttemptCounter.erase (rnti);
+  m_cmacSapProvider.at (0)->InvalidateMsg4ValidityContext (rnti);
   m_ueActiveMap.erase (it);
   m_cmacSapProvider.at (0)->RemoveUe (rnti);
   m_ccmRrcSapProvider-> RemoveUe (rnti);
@@ -3392,14 +3896,21 @@ LteEnbRrc::RemoveUe (uint16_t rnti)
   std::map <uint16_t, Ptr<UeManager> >::iterator it = m_ueActiveMap.find (rnti);
   NS_ASSERT_MSG (it != m_ueActiveMap.end (), "request to remove UE info with unknown rnti " << rnti);
   uint64_t imsi = it->second->GetImsi ();
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogEnbContextEvent ("rrc", "remove-ue", rnti, imsi);
+    }
   uint16_t srsCi = (*it).second->GetSrsConfigurationIndex ();
+  it->second->ResetRlcEntities ();
   //cancel pending events
   it->second->CancelPendingEvents ();
   // fire trace upon connection release
   m_connectionReleaseTrace (imsi, ComponentCarrierToCellId (it->second->GetComponentCarrierId ()), rnti);
   m_ueActiveMap.erase (it);
+  m_msg4AttemptCounter.erase (rnti);
   for (uint8_t i = 0; i < m_numberOfComponentCarriers; i++)
     {
+      m_cmacSapProvider.at (i)->InvalidateMsg4ValidityContext (rnti);
       m_cmacSapProvider.at (i)->RemoveUe (rnti);
       m_cphySapProvider.at (i)->RemoveUe (rnti);
     }
@@ -3423,14 +3934,21 @@ LteEnbRrc::RemoveUeNb(uint16_t rnti, bool resumed)
   std::map <uint16_t, Ptr<UeManager> >::iterator it = m_ueActiveMap.find (rnti);
   NS_ASSERT_MSG (it != m_ueActiveMap.end (), "request to remove UE info with unknown rnti " << rnti);
   uint64_t imsi = it->second->GetImsi ();
+  if (SaraReport::IsEnabled ())
+    {
+      SaraReport::LogEnbContextEvent ("rrc", resumed ? "remove-ue-nb-resumed" : "remove-ue-nb", rnti, imsi);
+    }
   uint16_t srsCi = (*it).second->GetSrsConfigurationIndex ();
+  it->second->ResetRlcEntities ();
   //cancel pending events
   it->second->CancelPendingEvents ();
   // fire trace upon connection release
   m_connectionReleaseTrace (imsi, ComponentCarrierToCellId (it->second->GetComponentCarrierId ()), rnti);
   m_ueActiveMap.erase (it);
+  m_msg4AttemptCounter.erase (rnti);
   for (uint8_t i = 0; i < m_numberOfComponentCarriers; i++)
     {
+      m_cmacSapProvider.at (i)->InvalidateMsg4ValidityContext (rnti);
       m_cmacSapProvider.at (i)->RemoveUe (rnti);
       m_cphySapProvider.at (i)->RemoveUe (rnti);
     }
@@ -3784,13 +4302,17 @@ void LteEnbRrc::GenerateSystemInformationBlockType2Nb(std::pair<const uint8_t, n
   rsrpprachinfolist.ce2_lowerbound = -127.5;
 
   sib2.radioResourceConfigCommon.nprachConfig.rsrpThresholdsPrachInfoList = rsrpprachinfolist;
+  ValidateNprachCeConfig (m_nprachCe0NumSubcarriers, m_nprachCe1NumSubcarriers,
+                          m_nprachCe2NumSubcarriers, m_nprachCe0SubcarrierOffset,
+                          m_nprachCe1SubcarrierOffset, m_nprachCe2SubcarrierOffset,
+                          m_nprachStrictNoOverlap);
   // Values from Vodafone Cell / temporary
   NbIotRrcSap::NprachParametersNb ce0;
   ce0.coverageEnhancementLevel = NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel::zero;
   ce0.nprachPeriodicity = NbIotRrcSap::NprachParametersNb::NprachPeriodicity::ms320;
   ce0.nprachStartTime = NbIotRrcSap::NprachParametersNb::NprachStartTime::ms256;
-  ce0.nprachSubcarrierOffset = NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n36;
-  ce0.nprachNumSubcarriers = NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n12;
+  ce0.nprachSubcarrierOffset = ToNprachOffsetEnum (m_nprachCe0SubcarrierOffset);
+  ce0.nprachNumSubcarriers = ToNprachNumSubcarriersEnum (m_nprachCe0NumSubcarriers);
   ce0.nprachSubcarrierMsg3RangeStart = NbIotRrcSap::NprachParametersNb::NprachSubcarrierMsg3RangeStart::twoThird;
   ce0.maxNumPreambleAttemptCE = NbIotRrcSap::NprachParametersNb::MaxNumPreambleAttemptCE::n10;
   ce0.numRepetitionsPerPreambleAttempt = NbIotRrcSap::NprachParametersNb::NumRepetitionsPerPreambleAttempt::n1;
@@ -3802,8 +4324,8 @@ void LteEnbRrc::GenerateSystemInformationBlockType2Nb(std::pair<const uint8_t, n
   ce1.coverageEnhancementLevel = NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel::one;
   ce1.nprachPeriodicity = NbIotRrcSap::NprachParametersNb::NprachPeriodicity::ms640;
   ce1.nprachStartTime = NbIotRrcSap::NprachParametersNb::NprachStartTime::ms256;
-  ce1.nprachSubcarrierOffset = NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n24;
-  ce1.nprachNumSubcarriers = NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n12;
+  ce1.nprachSubcarrierOffset = ToNprachOffsetEnum (m_nprachCe1SubcarrierOffset);
+  ce1.nprachNumSubcarriers = ToNprachNumSubcarriersEnum (m_nprachCe1NumSubcarriers);
   ce1.nprachSubcarrierMsg3RangeStart = NbIotRrcSap::NprachParametersNb::NprachSubcarrierMsg3RangeStart::twoThird;
   ce1.maxNumPreambleAttemptCE = NbIotRrcSap::NprachParametersNb::MaxNumPreambleAttemptCE::n10;
   ce1.numRepetitionsPerPreambleAttempt = NbIotRrcSap::NprachParametersNb::NumRepetitionsPerPreambleAttempt::n8;
@@ -3815,8 +4337,8 @@ void LteEnbRrc::GenerateSystemInformationBlockType2Nb(std::pair<const uint8_t, n
   ce2.coverageEnhancementLevel = NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel::two;
   ce2.nprachPeriodicity = NbIotRrcSap::NprachParametersNb::NprachPeriodicity::ms2560;
   ce2.nprachStartTime = NbIotRrcSap::NprachParametersNb::NprachStartTime::ms256;
-  ce2.nprachSubcarrierOffset = NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n12;
-  ce2.nprachNumSubcarriers = NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n12;
+  ce2.nprachSubcarrierOffset = ToNprachOffsetEnum (m_nprachCe2SubcarrierOffset);
+  ce2.nprachNumSubcarriers = ToNprachNumSubcarriersEnum (m_nprachCe2NumSubcarriers);
   ce2.nprachSubcarrierMsg3RangeStart = NbIotRrcSap::NprachParametersNb::NprachSubcarrierMsg3RangeStart::twoThird;
   ce2.maxNumPreambleAttemptCE = NbIotRrcSap::NprachParametersNb::MaxNumPreambleAttemptCE::n10;
   ce2.numRepetitionsPerPreambleAttempt = NbIotRrcSap::NprachParametersNb::NumRepetitionsPerPreambleAttempt::n32;
@@ -3829,8 +4351,8 @@ void LteEnbRrc::GenerateSystemInformationBlockType2Nb(std::pair<const uint8_t, n
   ce0v14.coverageEnhancementLevel = NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel::zero;
   ce0v14.nprachPeriodicity = NbIotRrcSap::NprachParametersNb::NprachPeriodicity::ms320;
   ce0v14.nprachStartTime = NbIotRrcSap::NprachParametersNb::NprachStartTime::ms128;
-  ce0v14.nprachSubcarrierOffset = NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n36;
-  ce0v14.nprachNumSubcarriers = NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n12;
+  ce0v14.nprachSubcarrierOffset = ToNprachOffsetEnum (m_nprachCe0SubcarrierOffset);
+  ce0v14.nprachNumSubcarriers = ToNprachNumSubcarriersEnum (m_nprachCe0NumSubcarriers);
   ce0v14.nprachSubcarrierMsg3RangeStart = NbIotRrcSap::NprachParametersNb::NprachSubcarrierMsg3RangeStart::twoThird;
   ce0v14.npdcchNumRepetitionsRA = NbIotRrcSap::NprachParametersNb::NpdcchNumRepetitionsRA::r8;
   ce0v14.npdcchStartSfCssRa = NbIotRrcSap::NprachParametersNb::NpdcchStartSfCssRa::v2;
@@ -3840,8 +4362,8 @@ void LteEnbRrc::GenerateSystemInformationBlockType2Nb(std::pair<const uint8_t, n
   ce1v14.coverageEnhancementLevel = NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel::one;
   ce1v14.nprachPeriodicity = NbIotRrcSap::NprachParametersNb::NprachPeriodicity::ms640;
   ce1v14.nprachStartTime = NbIotRrcSap::NprachParametersNb::NprachStartTime::ms512;
-  ce1v14.nprachSubcarrierOffset = NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n24;
-  ce1v14.nprachNumSubcarriers = NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n12;
+  ce1v14.nprachSubcarrierOffset = ToNprachOffsetEnum (m_nprachCe1SubcarrierOffset);
+  ce1v14.nprachNumSubcarriers = ToNprachNumSubcarriersEnum (m_nprachCe1NumSubcarriers);
   ce1v14.nprachSubcarrierMsg3RangeStart = NbIotRrcSap::NprachParametersNb::NprachSubcarrierMsg3RangeStart::twoThird;
   ce1v14.npdcchNumRepetitionsRA = NbIotRrcSap::NprachParametersNb::NpdcchNumRepetitionsRA::r64;
   ce1v14.npdcchStartSfCssRa = NbIotRrcSap::NprachParametersNb::NpdcchStartSfCssRa::v1dot5;
@@ -3851,8 +4373,8 @@ void LteEnbRrc::GenerateSystemInformationBlockType2Nb(std::pair<const uint8_t, n
   ce2v14.coverageEnhancementLevel = NbIotRrcSap::NprachParametersNb::CoverageEnhancementLevel::two;
   ce2v14.nprachPeriodicity = NbIotRrcSap::NprachParametersNb::NprachPeriodicity::ms2560;
   ce2v14.nprachStartTime = NbIotRrcSap::NprachParametersNb::NprachStartTime::ms1024;
-  ce2v14.nprachSubcarrierOffset = NbIotRrcSap::NprachParametersNb::NprachSubcarrierOffset::n12;
-  ce2v14.nprachNumSubcarriers = NbIotRrcSap::NprachParametersNb::NprachNumSubcarriers::n12;
+  ce2v14.nprachSubcarrierOffset = ToNprachOffsetEnum (m_nprachCe2SubcarrierOffset);
+  ce2v14.nprachNumSubcarriers = ToNprachNumSubcarriersEnum (m_nprachCe2NumSubcarriers);
   ce2v14.nprachSubcarrierMsg3RangeStart = NbIotRrcSap::NprachParametersNb::NprachSubcarrierMsg3RangeStart::twoThird;
   ce2v14.npdcchNumRepetitionsRA = NbIotRrcSap::NprachParametersNb::NpdcchNumRepetitionsRA::r512;
   ce2v14.npdcchStartSfCssRa = NbIotRrcSap::NprachParametersNb::NpdcchStartSfCssRa::v4;

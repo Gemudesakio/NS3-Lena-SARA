@@ -315,6 +315,13 @@ public:
    */
   void RecvRrcConnectionRequest (LteRrcSap::RrcConnectionRequest msg);
   /**
+   * Start connection setup for a given IMSI without sending Msg4.
+   * This is used for SARA grouped resolution.
+   *
+   * \param imsi the UE IMSI
+   */
+  void StartConnectionSetupForImsi (uint64_t imsi);
+  /**
    * Implement the LteEnbRrcSapProvider::RecvRrcConnectionRequest interface.
    * \param msg the RRC connection request message
    */
@@ -429,6 +436,24 @@ public:
    *
    */
   void CancelPendingEvents ();
+
+  /**
+   * Arm (or re-arm) the connection-request watchdog from "now".
+   * This is used when Msg2 (RAR) is actually transmitted to the UE.
+   */
+  void ArmConnectionRequestTimeout ();
+
+  /**
+   * Reset SRB/DRB RLC entities and cancel their internal timers.
+   */
+  void ResetRlcEntities ();
+
+  /**
+   * Build an RRC Connection Setup message based on current configuration.
+   *
+   * \return a populated RrcConnectionSetup (without SARA-specific fields)
+   */
+  LteRrcSap::RrcConnectionSetup BuildRrcConnectionSetup ();
 
   /**
    * TracedCallback signature for state transition events.
@@ -1196,6 +1221,17 @@ public:
 
 private:
 
+  struct PendingConnReq
+  {
+    LteRrcSap::RrcConnectionRequest msg;
+    Time rxTime;
+  };
+
+  struct ContentionGroup
+  {
+    std::vector<PendingConnReq> entries;
+  };
+
 
   // RRC SAP methods
 
@@ -1212,6 +1248,51 @@ private:
    * \param msg the LteRrcSap::RrcConnectionRequest
    */
   void DoRecvRrcConnectionRequest (uint16_t rnti, LteRrcSap::RrcConnectionRequest msg);
+  /**
+   * Buffer grouped RRC connection requests for a given temp RNTI/window.
+   *
+   * \param rnti the temporary RNTI
+   * \param windowEnd end of Msg3 window (milliseconds)
+   * \param isLast true if this is the last message in the group
+   * \param msg the RrcConnectionRequest
+   */
+  void DoEnqueueConnectionRequest (uint16_t rnti, uint64_t windowEnd, bool isLast, LteRrcSap::RrcConnectionRequest msg);
+  /**
+   * Resolve a buffered contention group (temporary placeholder).
+   *
+   * \param rnti the temporary RNTI
+   * \param windowEnd end of Msg3 window (milliseconds)
+   */
+  void ResolveContentionGroup (uint16_t rnti, uint64_t windowEnd);
+  /**
+   * Cleanup callback for temporary RNTI used by grouped SARA contention resolution.
+   *
+   * \param rnti temporary RNTI
+   */
+  void GroupedTempRntiCleanupTimeout (uint16_t rnti);
+  /**
+   * Create a definitive UE context for the given IMSI and return its RNTI.
+   *
+   * \param tempRnti the temporary RNTI for this group
+   * \param imsi the UE IMSI
+   * \return assigned definitive RNTI
+   */
+  uint16_t CreateUeManagerForAssignedRnti (uint16_t tempRnti, uint64_t imsi);
+  /**
+   * Send grouped Msg4 using the temporary RNTI (SRB0 of the temp UE).
+   *
+   * \param tempRnti the temporary RNTI
+   * \param imsi the UE IMSI
+   * \param assignedRnti definitive RNTI assigned to the UE
+   */
+  void SendGroupedConnectionSetup (uint16_t tempRnti, uint64_t imsi, uint16_t assignedRnti);
+  void RegisterMsg4ValidityContext (uint16_t rnti, uint64_t imsi);
+  /**
+   * Cancel the connection-request timeout on the temporary UE context.
+   *
+   * \param tempRnti the temporary RNTI
+   */
+  void CancelTempRntiRequestTimeout (uint16_t tempRnti);
   /**
    * Part of the RRC protocol. Forwarding LteEnbRrcSapProvider::RecvRrcConnectionRequest interface to UeManager::RecvRrcConnectionRequest
    *
@@ -1408,6 +1489,9 @@ private:
   void DoNotifyDataInactivitySchedulerNb(uint16_t rnti);
 
   void DoNotifyDataActivitySchedulerNb(uint16_t rnti);
+
+  void DoNotifySharedFallbackWindowClosed (uint16_t rnti);
+  void DoNotifyRaResponseTransmitted (uint16_t rnti);
   /**
    * RRC configuration update indication function
    *
@@ -1642,6 +1726,7 @@ private:
   std::vector<LteEnbCmacSapUser*> m_cmacSapUser;
   /// Interface to the eNodeB MAC instance.
   std::vector<LteEnbCmacSapProvider*> m_cmacSapProvider;
+  std::map<uint16_t, uint32_t> m_msg4AttemptCounter;
 
   /// Receive API calls from the handover algorithm instance.
   LteHandoverManagementSapUser* m_handoverManagementSapUser;
@@ -1708,6 +1793,10 @@ private:
    */
 
   std::map<uint16_t, Ptr<UeManager> > m_ueResumedMap;
+  /**
+   * Buffer of grouped Msg3 (RRCConnectionRequest) by temp RNTI and window end.
+   */
+  std::map<std::pair<uint16_t, uint64_t>, ContentionGroup> m_contentionGroups;
 
   /**
    * List of measurement configuration which are active in every UE attached to
@@ -1805,6 +1894,12 @@ private:
    */
   Time m_connectionSetupTimeoutDuration;
   /**
+   * The `Msg4ValidityDuration` attribute. Maximum scheduling horizon for
+   * Msg4 after Msg3 was accepted by eNB. Messages beyond this window are
+   * considered stale and are purged in the scheduler.
+   */
+  Time m_msg4ValidityDuration;
+  /**
    * The `ConnectionSetupTimeoutDuration` attribute. After accepting connection
    * request, if no RRC CONNECTION SETUP COMPLETE is received before this time,
    * the UE context is destroyed. Must account for the UE's reception of RRC
@@ -1895,6 +1990,16 @@ private:
   uint16_t m_dataInactivityInterval;
 
   bool m_enablePSM;
+
+  // NPRACH Msg1 layout per CE level (3.75 kHz logical space).
+  // These parameters affect only Msg1 contention resources; Msg3 grid remains unchanged.
+  uint8_t m_nprachCe0NumSubcarriers;
+  uint8_t m_nprachCe1NumSubcarriers;
+  uint8_t m_nprachCe2NumSubcarriers;
+  uint8_t m_nprachCe0SubcarrierOffset;
+  uint8_t m_nprachCe1SubcarrierOffset;
+  uint8_t m_nprachCe2SubcarrierOffset;
+  bool m_nprachStrictNoOverlap;
 
   void GenerateSystemInformationBlockType1Nb();
   void GenerateSystemInformationBlockType2Nb(std::pair<const uint8_t, ns3::Ptr<ns3::ComponentCarrierBaseStation>> cc);

@@ -36,6 +36,9 @@
 #include "lte-enb-rrc.h"
 #include "lte-enb-net-device.h"
 #include "lte-ue-net-device.h"
+#include "nb-iot-msg3-imsi-tag.h"
+#include "sara-msg3-group-tag.h"
+#include "sara-report.h"
 
 #include <chrono>
 #include <iomanip>
@@ -47,6 +50,12 @@
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("LteRrcProtocolReal");
+
+namespace
+{
+uint64_t g_staleSetUeRrcSapProviderDrops = 0;
+uint64_t g_staleRemoveUeCalls = 0;
+}
 
 /// RRC real message delay
 const Time RRC_REAL_MSG_DELAY = MilliSeconds (0); 
@@ -187,6 +196,8 @@ void
 LteUeRrcProtocolReal::DoSendRrcConnectionSetupCompleted (LteRrcSap::RrcConnectionSetupCompleted msg)
 {
   Ptr<Packet> packet = Create<Packet> ();
+
+  m_rnti = m_rrc->GetRnti ();
 
   RrcConnectionSetupCompleteHeader rrcConnectionSetupCompleteHeader;
   rrcConnectionSetupCompleteHeader.SetMessage (msg);
@@ -468,6 +479,41 @@ LteUeRrcProtocolReal::DoReceivePdcpPdu (Ptr<Packet> p)
       // RrcConnectionSetup
       p->RemoveHeader (rrcConnectionSetupHeader);
       rrcConnectionSetupMsg = rrcConnectionSetupHeader.GetMessage ();
+      {
+        // Decide whether to accept or drop (SARA: accept only if IMSI matches).
+        uint8_t decision = 1;
+        uint8_t dropReason = 0;
+        uint64_t ueImsi = m_rrc ? m_rrc->GetImsi () : 0;
+        uint16_t ueState = m_rrc ? static_cast<uint16_t> (m_rrc->GetState ()) : 0;
+        uint16_t tcRnti = m_rrc ? m_rrc->GetRnti () : 0;
+        uint16_t cRnti = (rrcConnectionSetupMsg.assignedRnti != 0) ? rrcConnectionSetupMsg.assignedRnti : tcRnti;
+
+        if (m_rrc && (m_rrc->GetState () != LteUeRrc::IDLE_CONNECTING))
+          {
+            decision = 0;
+            dropReason = 1; // state_mismatch
+            NS_LOG_INFO ("Dropping Msg4 in state " << (uint16_t) m_rrc->GetState ());
+          }
+        else if ((rrcConnectionSetupMsg.ueIdentity != 0) && m_rrc
+                 && (rrcConnectionSetupMsg.ueIdentity != m_rrc->GetImsi ()))
+          {
+            decision = 0;
+            dropReason = 2; // imsi_mismatch
+            NS_LOG_INFO ("Dropping Msg4 for IMSI " << rrcConnectionSetupMsg.ueIdentity
+                         << " at UE IMSI " << m_rrc->GetImsi ());
+          }
+
+        if (SaraReport::IsEnabled ())
+          {
+            SaraReport::LogMsg4RxUe (Simulator::GetContext (), ueImsi, ueState, tcRnti,
+                                     rrcConnectionSetupMsg.ueIdentity, cRnti, decision, dropReason);
+          }
+
+        if (decision == 0)
+          {
+            break;
+          }
+      }
       m_ueRrcSapProvider->RecvRrcConnectionSetup (rrcConnectionSetupMsg);
       break;
     case 4:
@@ -603,8 +649,13 @@ LteEnbRrcProtocolReal::SetUeRrcSapProvider (uint16_t rnti, LteUeRrcSapProvider* 
 {
   std::map<uint16_t, LteUeRrcSapProvider*>::iterator it;
   it = m_enbRrcSapProviderMap.find (rnti);
-  NS_ASSERT_MSG (it != m_enbRrcSapProviderMap.end (), "Cell id " << m_cellId
-                                         << " could not find RNTI = " << rnti);
+  if (it == m_enbRrcSapProviderMap.end ())
+    {
+      ++g_staleSetUeRrcSapProviderDrops;
+      NS_LOG_WARN ("Drop stale SetUeRrcSapProvider: cellId=" << m_cellId
+                   << " rnti=" << rnti);
+      return;
+    }
   it->second = p;
 }
 
@@ -686,7 +737,14 @@ LteEnbRrcProtocolReal::DoRemoveUe (uint16_t rnti)
   NS_LOG_FUNCTION (this << rnti);
   std::map<uint16_t, LteEnbRrcSapProvider::CompleteSetupUeParameters>::iterator 
     it = m_completeSetupUeParametersMap.find (rnti);
-  NS_ASSERT (it != m_completeSetupUeParametersMap.end ());
+  if (it == m_completeSetupUeParametersMap.end ())
+    {
+      ++g_staleRemoveUeCalls;
+      NS_LOG_WARN ("Drop stale DoRemoveUe for unknown rnti=" << rnti);
+      m_enbRrcSapProviderMap.erase (rnti);
+      m_setupUeParametersMap.erase (rnti);
+      return;
+    }
   delete it->second.srb0SapUser;
   delete it->second.srb1SapUser;
   m_completeSetupUeParametersMap.erase (it);
@@ -700,7 +758,14 @@ LteEnbRrcProtocolReal::DoRemoveUe (uint16_t rnti, bool resumed)
   NS_LOG_FUNCTION (this << rnti);
   std::map<uint16_t, LteEnbRrcSapProvider::CompleteSetupUeParameters>::iterator 
     it = m_completeSetupUeParametersMap.find (rnti);
-  NS_ASSERT (it != m_completeSetupUeParametersMap.end ());
+  if (it == m_completeSetupUeParametersMap.end ())
+    {
+      ++g_staleRemoveUeCalls;
+      NS_LOG_WARN ("Drop stale DoRemoveUe(resumed) for unknown rnti=" << rnti);
+      m_enbRrcSapProviderMap.erase (rnti);
+      m_setupUeParametersMap.erase (rnti);
+      return;
+    }
   if(!resumed){
     delete it->second.srb0SapUser;
     delete it->second.srb1SapUser;
@@ -784,6 +849,28 @@ LteEnbRrcProtocolReal::DoSendSystemInformationNb (uint16_t cellId, NbIotRrcSap::
 void 
 LteEnbRrcProtocolReal::DoSendRrcConnectionSetup (uint16_t rnti, LteRrcSap::RrcConnectionSetup msg)
 {
+  // Classify as SARA only when grouped-assignment is present.
+  // Legacy/new may now include ueIdentity for strict UE-side Msg4 filtering.
+  if (msg.assignedRnti != 0)
+    {
+      NS_LOG_UNCOND ("[ENB][MSG4][SARA-TX] TC-RNTI=" << rnti
+                     << " imsi=" << msg.ueIdentity
+                     << " C-RNTI=" << msg.assignedRnti);
+      if (SaraReport::IsEnabled ())
+        {
+          SaraReport::LogMsg4Enb (rnti, msg.ueIdentity, msg.assignedRnti, true);
+        }
+    }
+  else
+    {
+      NS_LOG_UNCOND ("[ENB][MSG4][LEGACY-TX] TC-RNTI=" << rnti
+                     << " imsi=" << msg.ueIdentity
+                     << " C-RNTI=" << rnti);
+      if (SaraReport::IsEnabled ())
+        {
+          SaraReport::LogMsg4Enb (rnti, msg.ueIdentity, rnti, false);
+        }
+    }
   Ptr<Packet> packet = Create<Packet> ();
 
   RrcConnectionSetupHeader rrcConnectionSetupHeader;
@@ -974,11 +1061,35 @@ LteEnbRrcProtocolReal::DoReceivePdcpPdu (uint16_t rnti, Ptr<Packet> p)
       m_enbRrcSapProvider->RecvRrcConnectionReestablishmentRequest (rnti,rrcConnectionReestablishmentRequestMsg);
       break;
     case 1:
-      p->RemoveHeader (rrcConnectionRequestHeader);
-      LteRrcSap::RrcConnectionRequest rrcConnectionRequestMsg;
-      rrcConnectionRequestMsg = rrcConnectionRequestHeader.GetMessage ();
-      m_enbRrcSapProvider->RecvRrcConnectionRequest (rnti,rrcConnectionRequestMsg);
-      break;
+      {
+        SaraMsg3GroupTag groupTag;
+        bool hasGroupTag = p->PeekPacketTag (groupTag);
+        p->RemoveHeader (rrcConnectionRequestHeader);
+        LteRrcSap::RrcConnectionRequest rrcConnectionRequestMsg;
+        rrcConnectionRequestMsg = rrcConnectionRequestHeader.GetMessage ();
+        if (rrcConnectionRequestMsg.ueIdentity == 0)
+          {
+            NbIotMsg3ImsiTag msg3ImsiTag;
+            if (p->PeekPacketTag (msg3ImsiTag))
+              {
+                rrcConnectionRequestMsg.ueIdentity = msg3ImsiTag.GetImsi ();
+              }
+          }
+        if (hasGroupTag)
+          {
+            uint16_t tempRnti = 0;
+            uint64_t windowEnd = 0;
+            bool isLast = false;
+            groupTag.Get (tempRnti, windowEnd, isLast);
+            p->RemovePacketTag (groupTag);
+            m_enbRrcSapProvider->RecvRrcConnectionRequestGrouped (tempRnti, windowEnd, isLast, rrcConnectionRequestMsg);
+          }
+        else
+          {
+            m_enbRrcSapProvider->RecvRrcConnectionRequest (rnti, rrcConnectionRequestMsg);
+          }
+        break;
+      }
     case 2:
       p->RemoveHeader(rrcConnectionResumeRequestNbHeader);
       NbIotRrcSap::RrcConnectionResumeRequestNb rrcConnectionResumeRequestNbMsg;

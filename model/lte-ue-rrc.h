@@ -772,6 +772,11 @@ private:
    * Apply radio resource config dedicated.
    * \param rrcd LteRrcSap::RadioResourceConfigDedicated
    */
+  void ApplyAssignedRnti (uint16_t rntiDef);
+  /**
+   * Apply radio resource config dedicated.
+   * \param rrcd LteRrcSap::RadioResourceConfigDedicated
+   */
   void ApplyRadioResourceConfigDedicated (LteRrcSap::RadioResourceConfigDedicated rrcd);
   /**
    * Apply radio resource config dedicated secondary carrier.

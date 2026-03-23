@@ -2357,7 +2357,8 @@ RrcAsn1Header::DeserializeLogicalChannelConfig (LteRrcSap::LogicalChannelConfig 
   if (bitset1[0])
     {
       // Deserialize ul-SpecificParameters sequence
-      bIterator = DeserializeSequence (&bitset1,false,bIterator);
+      std::bitset<1> bitset2;
+      bIterator = DeserializeSequence (&bitset2,false,bIterator);
 
       // Deserialize priority
       bIterator = DeserializeInteger (&n,1,16,bIterator);
@@ -2426,7 +2427,7 @@ RrcAsn1Header::DeserializeLogicalChannelConfig (LteRrcSap::LogicalChannelConfig 
         }
       logicalChannelConfig->bucketSizeDurationMs = bucketSizeDurationMs;
 
-      if (bitset1[0])
+      if (bitset2[0])
         {
           // Deserialize logicalChannelGroup
           bIterator = DeserializeInteger (&n,0,3,bIterator);
@@ -5119,6 +5120,9 @@ RrcConnectionRequestHeader::GetMtmsi () const
 
 //////////////////// RrcConnectionSetup class ////////////////////////
 RrcConnectionSetupHeader::RrcConnectionSetupHeader ()
+  : m_rrcTransactionIdentifier (0),
+    m_ueIdentity (0),
+    m_assignedRnti (0)
 {
 }
  
@@ -5159,8 +5163,22 @@ RrcConnectionSetupHeader::PreSerialize () const
   SerializeChoice (8,0,false);
 
   // Serialize rrcConnectionSetup-r8 sequence
-  // 1 optional fields (not present). Extension marker not present.
-  SerializeSequence (std::bitset<1> (0),false);
+  // 2 optional fields: [0]=UE identity (+ optional assignedRnti for SARA), [1]=nonCriticalExtension.
+  // For legacy/new, ueIdentity may be present with assignedRnti=0.
+  bool hasIdentityInfo = ((m_ueIdentity != 0) || (m_assignedRnti != 0));
+  std::bitset<2> opt (0);
+  opt[0] = hasIdentityInfo;
+  opt[1] = 0;
+  SerializeSequence (opt,false);
+
+  if (hasIdentityInfo)
+    {
+      std::bitset<32> imsiHi ((uint32_t)(m_ueIdentity >> 32));
+      std::bitset<32> imsiLo ((uint32_t)(m_ueIdentity & 0xFFFFFFFFULL));
+      SerializeBitstring (imsiHi);
+      SerializeBitstring (imsiLo);
+      SerializeBitstring (std::bitset<16> (m_assignedRnti));
+    }
 
   // Serialize RadioResourceConfigDedicated sequence
   SerializeRadioResourceConfigDedicated (m_radioResourceConfigDedicated);
@@ -5180,7 +5198,7 @@ RrcConnectionSetupHeader::Deserialize (Buffer::Iterator bIterator)
   int n;
 
   std::bitset<0> bitset0;
-  std::bitset<1> bitset1;
+  std::bitset<2> bitset1;
   std::bitset<2> bitset2;
 
   bIterator = DeserializeDlCcchMessage (bIterator);
@@ -5216,13 +5234,33 @@ RrcConnectionSetupHeader::Deserialize (Buffer::Iterator bIterator)
       else if (c1 == 0)
         {
           // Deserialize rrcConnectionSetup-r8
-          // 1 optional fields, no extension marker.
+          // 2 optional fields: [0]=SARA IMSI/RNTI, [1]=nonCriticalExtension
           bIterator = DeserializeSequence (&bitset1,false,bIterator);
+
+          if (bitset1[0])
+            {
+              std::bitset<32> imsiHi;
+              std::bitset<32> imsiLo;
+              bIterator = DeserializeBitstring (&imsiHi, bIterator);
+              bIterator = DeserializeBitstring (&imsiLo, bIterator);
+              m_ueIdentity =
+                (static_cast<uint64_t>(imsiHi.to_ulong ()) << 32) |
+                static_cast<uint64_t>(imsiLo.to_ulong ());
+
+              std::bitset<16> rntiBits;
+              bIterator = DeserializeBitstring (&rntiBits, bIterator);
+              m_assignedRnti = rntiBits.to_ulong ();
+            }
+          else
+            {
+              m_ueIdentity = 0;
+              m_assignedRnti = 0;
+            }
 
           // Deserialize radioResourceConfigDedicated
           bIterator = DeserializeRadioResourceConfigDedicated (&m_radioResourceConfigDedicated,bIterator);
 
-          if (bitset1[0])
+          if (bitset1[1])
             {
               // Deserialize nonCriticalExtension
               // 2 optional fields, no extension marker.
@@ -5241,6 +5279,8 @@ RrcConnectionSetupHeader::SetMessage (LteRrcSap::RrcConnectionSetup msg)
 {
   m_rrcTransactionIdentifier = msg.rrcTransactionIdentifier;
   m_radioResourceConfigDedicated = msg.radioResourceConfigDedicated;
+  m_ueIdentity = msg.ueIdentity;
+  m_assignedRnti = msg.assignedRnti;
   m_isDataSerialized = false;
 }
 
@@ -5250,6 +5290,8 @@ RrcConnectionSetupHeader::GetMessage () const
   LteRrcSap::RrcConnectionSetup msg;
   msg.rrcTransactionIdentifier = m_rrcTransactionIdentifier;
   msg.radioResourceConfigDedicated = m_radioResourceConfigDedicated; 
+  msg.ueIdentity = m_ueIdentity;
+  msg.assignedRnti = m_assignedRnti;
   return msg;
 }
 
@@ -7782,4 +7824,3 @@ RrcDlCcchMessage::SerializeDlCcchMessage (int messageType) const
 }
 
 } // namespace ns3
-

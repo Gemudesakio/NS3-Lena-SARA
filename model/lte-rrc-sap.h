@@ -701,7 +701,17 @@ public:
   /// RrcConnectionSetup structure
   struct RrcConnectionSetup
   {
+    RrcConnectionSetup ()
+      : rrcTransactionIdentifier (0),
+        ueIdentity (0),
+        assignedRnti (0),
+        radioResourceConfigDedicated ()
+    {
+    }
+
     uint8_t rrcTransactionIdentifier; ///< RRC transaction identifier
+    uint64_t ueIdentity; ///< UE identity (IMSI)
+    uint16_t assignedRnti; ///< definitive RNTI assigned by eNB
     RadioResourceConfigDedicated radioResourceConfigDedicated; ///< radio resource config dedicated
   };
 
@@ -1349,6 +1359,18 @@ public:
   virtual void RecvRrcConnectionRequest (uint16_t rnti,
                                          RrcConnectionRequest msg) = 0;
   /**
+   * \brief Receive a grouped _RRCConnectionRequest_ message during an RRC
+   *        connection establishment procedure (SARA grouping).
+   * \param rnti the temporary RNTI of UE which sent the message
+   * \param windowEnd end of the Msg3 resolution window (milliseconds)
+   * \param isLast true if this is the last message in the group
+   * \param msg the message
+   */
+  virtual void RecvRrcConnectionRequestGrouped (uint16_t rnti,
+                                                uint64_t windowEnd,
+                                                bool isLast,
+                                                RrcConnectionRequest msg) = 0;
+  /**
    * \brief Receive an _RRCConnectionRequest_ message from a UE
    *        during an RRC connection establishment procedure
    *        (Section 5.3.3 of TS 36.331).
@@ -1930,6 +1952,7 @@ public:
 
   virtual void CompleteSetupUe (uint16_t rnti, CompleteSetupUeParameters params);
   virtual void RecvRrcConnectionRequest (uint16_t rnti, RrcConnectionRequest msg);
+  virtual void RecvRrcConnectionRequestGrouped (uint16_t rnti, uint64_t windowEnd, bool isLast, RrcConnectionRequest msg);
   virtual void RecvRrcConnectionResumeRequestNb (uint16_t rnti, NbIotRrcSap::RrcConnectionResumeRequestNb msg);
   virtual void RecvRrcEarlyDataRequestNb (uint16_t rnti, NbIotRrcSap::RrcEarlyDataRequestNb msg);
   virtual void RecvRrcConnectionSetupCompleted (uint16_t rnti, RrcConnectionSetupCompleted msg);
@@ -1968,6 +1991,13 @@ void
 MemberLteEnbRrcSapProvider<C>::RecvRrcConnectionRequest (uint16_t rnti, RrcConnectionRequest msg)
 {
   Simulator::ScheduleNow (&C::DoRecvRrcConnectionRequest, m_owner, rnti, msg);
+}
+
+template <class C>
+void
+MemberLteEnbRrcSapProvider<C>::RecvRrcConnectionRequestGrouped (uint16_t rnti, uint64_t windowEnd, bool isLast, RrcConnectionRequest msg)
+{
+  Simulator::ScheduleNow (&C::DoEnqueueConnectionRequest, m_owner, rnti, windowEnd, isLast, msg);
 }
 
 template <class C>
@@ -2049,7 +2079,4 @@ void MemberLteEnbRrcSapProvider<C>::RecvIdealUeContextRemoveRequest (uint16_t rn
 
 
 #endif // LTE_RRC_SAP_H
-
-
-
 

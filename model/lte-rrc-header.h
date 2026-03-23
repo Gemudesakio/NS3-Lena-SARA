@@ -780,6 +780,8 @@ public:
 
 private:
   uint8_t m_rrcTransactionIdentifier; ///< RRC transaction identifier
+  uint64_t m_ueIdentity; ///< UE identity (IMSI) when SARA is enabled
+  uint16_t m_assignedRnti; ///< definitive RNTI assigned by eNB when SARA is enabled
   mutable LteRrcSap::RadioResourceConfigDedicated m_radioResourceConfigDedicated; ///< radio resource config dedicated
 };
 
@@ -1361,4 +1363,3 @@ private:
 } // namespace ns3
 
 #endif // RRC_HEADER_H
-

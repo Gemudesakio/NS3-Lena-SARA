@@ -7,6 +7,9 @@ def build(bld):
         lte_module_dependencies.append('fd-net-device')
     module = bld.create_ns3_module('lte', lte_module_dependencies)
     module.source = [
+        'model/sara-report.cc',
+        'model/sara-msg3-group-tag.cc',
+        'model/sara-ul-id-tag.cc',
         'model/lte-common.cc',
         'model/lte-spectrum-phy.cc',
         'model/lte-spectrum-signal-parameters.cc',
@@ -54,6 +57,7 @@ def build(bld):
         'helper/radio-environment-map-helper.cc',
         'helper/lte-hex-grid-enb-topology-helper.cc',
         'helper/lte-global-pathloss-database.cc',
+        'helper/nb-iot-traffic-helper.cc',
         'model/rem-spectrum-phy.cc',
         'model/ff-mac-common.cc',
         'model/ff-mac-csched-sap.cc',
@@ -140,6 +144,7 @@ def build(bld):
         'model/nb-iot-energy.cc',
         'model/nb-iot-data-volume-and-power-headroom-tag.cc',
         'model/nb-iot-buffer-status-report-tag.cc',
+        'model/nb-iot-msg3-imsi-tag.cc',
         'model/nb-iot-scma-msg3-tag.cc'
         ]
 
@@ -214,6 +219,9 @@ def build(bld):
     headers = bld(features='ns3header')
     headers.module = 'lte'
     headers.source = [
+        'model/sara-report.h',
+        'model/sara-msg3-group-tag.h',
+        'model/sara-ul-id-tag.h',
         'model/lte-common.h',
         'model/lte-spectrum-phy.h',
         'model/lte-spectrum-signal-parameters.h',
@@ -261,6 +269,7 @@ def build(bld):
         'helper/radio-environment-map-helper.h',
         'helper/lte-hex-grid-enb-topology-helper.h',
         'helper/lte-global-pathloss-database.h',
+        'helper/nb-iot-traffic-helper.h',
         'model/rem-spectrum-phy.h',
         'model/ff-mac-common.h',
         'model/ff-mac-csched-sap.h',
@@ -347,6 +356,7 @@ def build(bld):
         'model/nb-iot-energy.h',
         'model/nb-iot-data-volume-and-power-headroom-tag.h',
         'model/nb-iot-buffer-status-report-tag.h',
+        'model/nb-iot-msg3-imsi-tag.h',
         'model/nb-iot-scma-msg3-tag.h'
         ]
 

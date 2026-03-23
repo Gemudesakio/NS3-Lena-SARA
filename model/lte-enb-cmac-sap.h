@@ -182,6 +182,38 @@ public:
 
 
   virtual void NotifyConnectionSuccessful(uint16_t rnti) = 0;
+
+  /**
+   * Register mapping from temporary RNTI (RA) to assigned C-RNTI (SARA).
+   *
+   * \param tempRnti temporary RNTI used for Msg4
+   * \param assignedRnti definitive C-RNTI assigned by eNB
+   */
+  virtual void MapTempRntiToDefRnti (uint16_t tempRnti, uint16_t assignedRnti) = 0;
+
+  struct Msg4ValidityContext
+  {
+    uint64_t imsi;
+    uint32_t raAttemptId;
+    uint16_t tcRnti;
+    uint64_t msg3EndSubframe;
+    uint64_t deadlineSubframe;
+  };
+
+  /**
+   * Register a Msg4 validity window for a specific temporary RNTI.
+   *
+   * \param rnti temporary RNTI used to schedule Msg4 (NPDCCH/NPDSCH)
+   * \param ctx metadata for attempt/deadline validation
+   */
+  virtual void RegisterMsg4ValidityContext (uint16_t rnti, const Msg4ValidityContext &ctx) = 0;
+
+  /**
+   * Invalidate Msg4 validity window for a specific temporary RNTI.
+   *
+   * \param rnti temporary RNTI used to schedule Msg4
+   */
+  virtual void InvalidateMsg4ValidityContext (uint16_t rnti) = 0;
   /**
    * \brief AllocateNcRaPreambleReturnValue structure
    * 
@@ -261,6 +293,22 @@ public:
    * \param success true if the operation was successful, false otherwise
    */
   virtual void NotifyDataActivitySchedulerNb(uint16_t rnti) = 0;
+
+  /**
+   * Notify RRC that a shared-fallback Msg3 window has closed for this temporary
+   * RNTI and the RA context can be cleaned up early.
+   *
+   * \param rnti the temporary C-RNTI used in shared-fallback
+   */
+  virtual void NotifySharedFallbackWindowClosed (uint16_t rnti) = 0;
+
+  /**
+   * Notify RRC that a RAR for this temporary C-RNTI has been transmitted on air.
+   * Used to arm the connection-request watchdog at the correct reference time.
+   *
+   * \param rnti temporary C-RNTI contained in the RAR
+   */
+  virtual void NotifyRaResponseTransmitted (uint16_t rnti) = 0;
 
   /**
    * \brief Parameters for [re]configuring the UE 

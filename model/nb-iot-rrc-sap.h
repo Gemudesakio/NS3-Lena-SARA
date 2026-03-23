@@ -866,12 +866,22 @@ class NbIotRrcSap{
             NprachParametersNb::CoverageEnhancementLevel ceLevel;
             RarPayload rarPayload;
 
+            // --- SARA extensions ---
+            bool     saraGroup     = false;
+            uint8_t  saraGroupSize = 1;
+            uint8_t  saraTag       = 0;
+
             // --- New schema extensions ---
             // ToA does not travel in Msg1; this metadata is assigned by eNB-side logic.
             bool     toaValid   = false;
             uint16_t toaBin     = 0;
             uint8_t  codebookId = 0;
             uint16_t virtualId  = 0;
+
+            // Common fallback for unresolved collision:
+            // one shared RAR is sent to consume real resources, and Msg3 resolution
+            // is handled in eNB MAC to avoid invalid multi-UE progression.
+            bool     sharedCollisionFallback = false;
         };
 
 

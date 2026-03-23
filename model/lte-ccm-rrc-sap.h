@@ -229,6 +229,14 @@ public:
   virtual Ptr<UeManager> GetUeManager (uint16_t rnti) = 0;
 
   /**
+   * Check whether a UE manager exists for a given RNTI.
+   *
+   * \param rnti RNTI
+   * \return true if UE manager exists
+   */
+  virtual bool HasUeManager (uint16_t rnti) = 0;
+
+  /**
    * \brief Set the number of component carriers
    *
    * \param noOfComponentCarriers The number of component carriers
@@ -340,6 +348,7 @@ public:
   virtual uint8_t AddUeMeasReportConfigForComponentCarrier (LteRrcSap::ReportConfigEutra reportConfig);
   virtual void TriggerComponentCarrier (uint16_t rnti, uint16_t targetCellId);
   virtual Ptr<UeManager> GetUeManager (uint16_t rnti);
+  virtual bool HasUeManager (uint16_t rnti);
   virtual void SetNumberOfComponentCarriers (uint16_t noOfComponentCarriers);
 
 private:
@@ -390,6 +399,13 @@ MemberLteCcmRrcSapUser<C>::GetUeManager (uint16_t rnti)
 }
 
 template <class C>
+bool
+MemberLteCcmRrcSapUser<C>::HasUeManager (uint16_t rnti)
+{
+  return m_owner->HasUeManager (rnti);
+}
+
+template <class C>
 void
 MemberLteCcmRrcSapUser<C>::SetNumberOfComponentCarriers (uint16_t noOfComponentCarriers)
 {
@@ -400,4 +416,3 @@ MemberLteCcmRrcSapUser<C>::SetNumberOfComponentCarriers (uint16_t noOfComponentC
 
 
 #endif /* LTE_CCM_RRC_SAP_H */
-

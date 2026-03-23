@@ -38,6 +38,7 @@
 #include <ns3/lte-rlc-tm.h>
 #include <ns3/lte-rlc-um.h>
 #include <ns3/lte-rlc-am.h>
+#include "sara-report.h"
 #include <ns3/lte-pdcp.h>
 #include <ns3/lte-radio-bearer-info.h>
 #include <fstream>
@@ -173,12 +174,16 @@ LteUeRrc::LteUeRrc ()
     m_hasReceivedMib (false),
     m_hasReceivedSib1 (false),
     m_hasReceivedSib2 (false),
+    m_hasReceivedMibNb (false),
+    m_hasReceivedSib1Nb (false),
+    m_hasReceivedSib2Nb (false),
     m_csgWhiteList (0),
     m_noOfSyncIndications (0),
     m_leaveConnectedMode (false),
     m_previousCellId (0),
     m_connEstFailCountLimit (0),
     m_connEstFailCount (0),
+    m_resumePending (false),
     m_useEdtPreamble(false),
     m_t3412(Days(5)),
     m_t3324(MilliSeconds(3500)),
@@ -1344,9 +1349,37 @@ LteUeRrc::DoRecvRrcConnectionSetup (LteRrcSap::RrcConnectionSetup msg)
     {
     case IDLE_CONNECTING:
       {
-        NS_LOG_INFO ("[UE][MSG4][RX] imsi=" << m_imsi
-                    << " c-rnti=" << m_rnti
-                    << " cellId=" << m_cellId);
+        bool isSara = (msg.assignedRnti != 0) && (msg.ueIdentity != 0);
+        if (isSara)
+          {
+            if (msg.ueIdentity != m_imsi)
+              {
+                return;
+              }
+            NS_LOG_INFO ("[UE][MSG4][SARA-ACCEPT] node=" << Simulator::GetContext ()
+                         << " imsi=" << m_imsi
+                         << " TC-RNTI=" << m_rnti
+                         << " C-RNTI=" << msg.assignedRnti);
+            if (SaraReport::IsEnabled ())
+              {
+                SaraReport::LogMsg4Ue (Simulator::GetContext (), m_imsi,
+                                       m_rnti, msg.assignedRnti, true);
+              }
+            ApplyAssignedRnti (msg.assignedRnti);
+          }
+        else
+          {
+            NS_LOG_INFO ("[UE][MSG4][LEGACY-ACCEPT] node=" << Simulator::GetContext ()
+                         << " imsi=" << m_imsi
+                         << " TC-RNTI=" << m_rnti
+                         << " C-RNTI=" << m_rnti);
+            if (SaraReport::IsEnabled ())
+              {
+                SaraReport::LogMsg4Ue (Simulator::GetContext (), m_imsi,
+                                       m_rnti, m_rnti, false);
+              }
+          }
+
         ApplyRadioResourceConfigDedicated (msg.radioResourceConfigDedicated);
         m_connEstFailCount = 0;
         m_connectionTimeout.Cancel ();
@@ -1354,10 +1387,14 @@ LteUeRrc::DoRecvRrcConnectionSetup (LteRrcSap::RrcConnectionSetup msg)
         m_leaveConnectedMode = false;
         LteRrcSap::RrcConnectionSetupCompleted msg2;
         msg2.rrcTransactionIdentifier = msg.rrcTransactionIdentifier;
+        NS_LOG_INFO ("[UE][MSG5][TX] node=" << Simulator::GetContext ()
+                     << " imsi=" << m_imsi
+                     << " C-RNTI=" << m_rnti);
+        if (SaraReport::IsEnabled ())
+          {
+            SaraReport::LogMsg5Tx (Simulator::GetContext (), m_imsi, m_rnti);
+          }
         m_rrcSapUser->SendRrcConnectionSetupCompleted (msg2);
-        NS_LOG_INFO ("[UE][MSG4][COMPLETE] imsi=" << m_imsi
-                    << " c-rnti=" << m_rnti
-                    << " t=" << Simulator::Now ().GetSeconds () << "s");
         m_asSapUser->NotifyConnectionSuccessful ();
         m_cmacSapProvider.at (0)->NotifyConnectionSuccessful ();
         //NS_BUILD_DEBUG(std::cout << "CONNECTION COMPLETE" << std::endl);
@@ -1365,6 +1402,9 @@ LteUeRrc::DoRecvRrcConnectionSetup (LteRrcSap::RrcConnectionSetup msg)
         //m_asSapUser->NotifyMessage4();
         //SwitchToState(IDLE_START);
         m_connectionEstablishedTrace (m_imsi, m_cellId, m_rnti);
+        NS_LOG_INFO ("[UE][MSG4][COMPLETE] node=" << Simulator::GetContext ()
+                     << " t=" << Simulator::Now ().GetSeconds () << "s imsi=" << m_imsi
+                     << " C-RNTI=" << m_rnti);
         NS_ABORT_MSG_IF (m_noOfSyncIndications > 0, "Sync indications should be zero "
                          "when a new RRC connection is established. Current value = " << (uint16_t) m_noOfSyncIndications);
       }
@@ -1373,6 +1413,52 @@ LteUeRrc::DoRecvRrcConnectionSetup (LteRrcSap::RrcConnectionSetup msg)
     default:
       NS_FATAL_ERROR ("method unexpected in state " << ToString (m_state));
       break;
+    }
+}
+
+void
+LteUeRrc::ApplyAssignedRnti (uint16_t rntiDef)
+{
+  NS_LOG_FUNCTION (this << rntiDef);
+  m_rnti = rntiDef;
+
+  if (m_srb0 && m_srb0->m_rlc)
+    {
+      m_srb0->m_rlc->SetRnti (m_rnti);
+    }
+
+  if (!m_cphySapProvider.empty ())
+    {
+      m_cphySapProvider.at (0)->SetRnti (m_rnti);
+    }
+  if (!m_cmacSapProvider.empty ())
+    {
+      m_cmacSapProvider.at (0)->SetRnti (m_rnti);
+    }
+
+  if (m_srb1)
+    {
+      if (m_srb1->m_rlc)
+        {
+          m_srb1->m_rlc->SetRnti (m_rnti);
+        }
+      if (m_srb1->m_pdcp)
+        {
+          m_srb1->m_pdcp->SetRnti (m_rnti);
+        }
+    }
+
+  for (std::map<uint8_t, Ptr<LteDataRadioBearerInfo> >::iterator it = m_drbMap.begin ();
+       it != m_drbMap.end (); ++it)
+    {
+      if (it->second->m_pdcp)
+        {
+          it->second->m_pdcp->SetRnti (m_rnti);
+        }
+      if (it->second->m_rlc)
+        {
+          it->second->m_rlc->SetRnti (m_rnti);
+        }
     }
 }
 
@@ -3741,7 +3827,9 @@ LteUeRrc::SwitchToState (State newState)
       break;
 
     case IDLE_WAIT_SIB2:
-      if (m_hasReceivedSib2)
+      // NB-IoT RA must start only after SIB2-NB has been received.
+      // Using LTE SIB2 here can trigger premature StartConnectionNb().
+      if (m_hasReceivedSib2Nb)
         {
           NS_ASSERT (m_connectionPending);
           StartConnectionNb (m_useEdtPreamble);
